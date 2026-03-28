@@ -1,0 +1,12 @@
+regression:
+  target_column: avg_rating
+  feature_columns:
+    - calories
+    - protein
+    - fat
+    - sugar
+    - sodium
+    - ingredient_count
+    - step_count
+    - minutes
+  output_path: data/artifacts/regressor.joblib

@@ -1,0 +1,6 @@
+project:
+  name: recipe-discovery-webapp
+  random_state: 42
+
+app:
+  title: Recipe Discovery Web App

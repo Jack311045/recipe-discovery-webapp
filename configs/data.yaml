@@ -1,0 +1,11 @@
+paths:
+  raw_recipes: data/raw/RAW_recipes.csv
+  raw_interactions: data/raw/RAW_interactions.csv
+  processed_recipes: data/processed/recipes_processed.parquet
+  recipe_corpus: data/processed/recipe_corpus.parquet
+
+splits:
+  train_frac: 0.80
+  val_frac: 0.10
+  test_frac: 0.10
+  random_state: 42

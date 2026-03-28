@@ -1,0 +1,5 @@
+retrieval:
+  top_k_default: 10
+  similarity: cosine
+  metadata_path: data/processed/recipe_metadata.parquet
+  index_path: data/artifacts/retrieval_index.joblib
