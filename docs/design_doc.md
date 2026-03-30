@@ -39,7 +39,7 @@ recipe-discovery-webapp/
 │   └── artifacts/                     # Saved models, embeddings, and indices
 │
 ├── docs/                              # Project documentation
-│   ├── proposal.md                    # Written proposal (two paragraphs)
+│   ├── proposal.md                    # Written proposal
 │   ├── design_doc.md                  # This document
 │   └── architecture.md                # System architecture notes
 │
@@ -118,6 +118,18 @@ recipe-discovery-webapp/
 | Jiaan Guo | Embeddings | Encode each recipe into a dense embedding using a pre-trained Transformer (`src/embeddings/`, `scripts/build_embeddings.py`, `scripts/build_index.py`) |
 | Eddie | Clustering | Implement k-means clustering from scratch in PyTorch over recipe embeddings and integrate cluster outputs into the exploratory browsing view (`src/clustering/`, `scripts/train_kmeans.py`) |
 | Blair | Regression | Fit a regression model for a rating-based ranking signal (`src/models/regression.py`, `scripts/train_regression.py`) |
-| David | Dimensionality reduction and frontend | Project embeddings into 2D with PCA and a nonlinear autoencoder (`src/reduction/`, `scripts/fit_pca.py`, `scripts/train_autoencoder.py`); lead the Streamlit app integration (`app/`) |
+| David | Dimensionality reduction | Project embeddings into 2D with PCA and a nonlinear autoencoder (`src/reduction/`, `scripts/fit_pca.py`, `scripts/train_autoencoder.py`) |
+| All | Frontend | Serve search and exploration through a Streamlit app (`app/`) |
 
-All members jointly contribute to the final presentation and README documentation.
+All members jointly contribute to the final presentation.
+
+## Modules covered
+
+- dense text embeddings
+- cosine nearest-neighbor retrieval
+- k-means clustering
+- regression ranking
+- PCA projection
+- autoencoder projection
+- optional classification
+- evaluation and data-splitting utilities
