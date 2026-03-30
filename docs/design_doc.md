@@ -79,7 +79,7 @@ recipe-discovery-webapp/
 │   │   ├── ranker.py                  # Combine similarity and regression scores
 │   │   └── service.py                 # End-to-end retrieval pipeline
 │   ├── clustering/
-│   │   ├── kmeans.py                  # K-means implemented from scratch (no scikit-learn)
+│   │   ├── kmeans.py                  # K-means implemented from scratch (algorithm implementation)
 │   │   ├── labels.py                  # Cluster label analysis and naming
 │   │   └── service.py                 # Clustering pipeline orchestration
 │   ├── models/
