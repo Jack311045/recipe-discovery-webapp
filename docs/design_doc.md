@@ -2,6 +2,15 @@
 
 ## Repo Structure
 
+- `app/`: Streamlit frontend for search, exploration, and diagnostics
+- `configs/`: central YAML configuration files
+- `data/`: local-only raw, interim, processed, and artifact storage
+- `docs/`: proposal and architecture notes
+- `notebooks/`: exploration and experimentation
+- `scripts/`: runnable training and preprocessing entrypoints
+- `src/recipe_discovery/`: package source code
+- `tests/`: smoke and unit tests
+
 ```
 recipe-discovery-webapp/
 ├── README.md                          # Project overview, setup instructions, and usage guide
