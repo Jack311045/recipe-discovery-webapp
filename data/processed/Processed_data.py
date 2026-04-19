@@ -2,10 +2,11 @@ import numpy as np
 import pandas as pd
 
 # Load the CSV file
-data = pd.read_csv('RAW_recipes.csv')
+data = pd.read_csv('data/raw/RAW_recipes.csv')
 data = data[data['tags'].notnull()]
 # Convert the tags column from string representation of lists to actual lists
 data['tags'] = data['tags'].apply(lambda x: eval(x) if isinstance(x, str) else x)
+print('hi')
 
 # Create one-hot encoding for the tags
 tags_one_hot = data['tags'].explode().str.get_dummies()
@@ -39,7 +40,7 @@ string_columns = data.columns.difference(float_columns)
 data[string_columns] = data[string_columns].astype(str)
 
 # Load the interactions CSV file
-interactions = pd.read_csv('RAW_interactions.csv')
+interactions = pd.read_csv('data/raw/RAW_interactions.csv')
 interactions = interactions.drop(columns=['date'], errors='ignore')
 
 # Group by 'id' to calculate the average rating and aggregate reviews
