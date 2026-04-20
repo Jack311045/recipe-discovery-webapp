@@ -2,4 +2,14 @@ embedding:
   model_name: sentence-transformers/all-MiniLM-L6-v2
   batch_size: 32
   normalize: true
-  output_path: data/artifacts/recipe_embeddings.npy
+
+artifacts:
+  embeddings: data/artifacts/recipe_embeddings.npy
+  recipe_ids: data/artifacts/recipe_ids.csv
+  recipe_texts: data/artifacts/recipe_texts.csv
+  metadata: data/artifacts/embedding_metadata.json
+  index: data/artifacts/recipe_index.joblib
+
+corpus:
+  include_nutrition: true
+  include_reviews: false
