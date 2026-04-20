@@ -81,5 +81,3 @@ data = data.sort_values(by='recipe_id').reset_index(drop=True)
 # Remove the 'tags' and 'nutrition' columns
 data = data.drop(columns=['tags', 'nutrition'], errors='ignore')
 
-data.to_csv('Processed_data_updated2.csv', index=False)
-print('done')
