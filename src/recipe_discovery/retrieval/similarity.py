@@ -10,6 +10,7 @@ def cosine_similarity(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     matrix_norm = np.linalg.norm(matrix, axis=1) + 1e-12
     return (matrix @ query) / (matrix_norm * query_norm)
 
+'''
 # Example usage
 if __name__ == "__main__":
     # Example input data
@@ -19,3 +20,4 @@ if __name__ == "__main__":
     # Calculate cosine similarity
     similarity_scores = cosine_similarity(query, matrix)
     print(similarity_scores)
+'''
