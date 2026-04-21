@@ -19,6 +19,7 @@ class RetrievalRequest:
     top_k: int = 10
     dietary_filter: str | None = None
     max_time_minutes: int | None = None
+    max_ingreidents: int | None = None
 
 
 class RetrievalService:
