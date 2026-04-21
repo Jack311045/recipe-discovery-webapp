@@ -4,20 +4,26 @@ from __future__ import annotations
 
 import numpy as np
 
+
 def cosine_similarity(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Return cosine similarity scores between one query vector and a matrix."""
-    query_norm = np.linalg.norm(query) + 1e-12
-    matrix_norm = np.linalg.norm(matrix, axis=1) + 1e-12
-    return (matrix @ query) / (matrix_norm * query_norm)
+    query_arr = np.asarray(query)
+    matrix_arr = np.asarray(matrix)
 
-'''
-# Example usage
-if __name__ == "__main__":
-    # Example input data
-    query = np.array([1, 2, 3])
-    matrix = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+    if matrix_arr.ndim != 2:
+        raise ValueError(f"Expected 2D matrix, got shape {matrix_arr.shape}.")
 
-    # Calculate cosine similarity
-    similarity_scores = cosine_similarity(query, matrix)
-    print(similarity_scores)
-'''
+    if query_arr.ndim == 2 and query_arr.shape[0] == 1:
+        query_arr = query_arr.reshape(-1)
+    if query_arr.ndim != 1:
+        raise ValueError(f"Expected 1D query vector, got shape {query_arr.shape}.")
+
+    if matrix_arr.shape[1] != query_arr.shape[0]:
+        raise ValueError(
+            "Dimension mismatch between query and matrix: "
+            f"query_dim={query_arr.shape[0]}, matrix_dim={matrix_arr.shape[1]}"
+        )
+
+    query_norm = np.linalg.norm(query_arr) + 1e-12
+    matrix_norm = np.linalg.norm(matrix_arr, axis=1) + 1e-12
+    return (matrix_arr @ query_arr) / (matrix_norm * query_norm)

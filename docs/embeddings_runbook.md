@@ -66,6 +66,12 @@ python scripts/build_index.py
 
 **Expected runtime:** A few seconds.
 
+### Runtime-design note
+
+1. The official v1 online retrieval path is direct cosine scoring in RetrievalService.
+2. recipe_index.joblib is retained as a validated optional optimization artifact.
+3. This is intentional and documented in retrieval_module.md.
+
 ### Optional flags
 
 ```bash
@@ -103,6 +109,30 @@ assert emb.shape[0] == len(ids)
 dists, inds = idx.kneighbors(emb[:1], n_neighbors=5)
 print("Nearest 5:", ids.iloc[inds[0]].values)
 ```
+
+---
+
+## Step 4: Medium-Scale Real-Runtime Pipeline Smoke
+
+Use this check before major team handoffs:
+
+```bash
+python scripts/smoke_medium_pipeline.py --subset-size 200 --top-k 5
+```
+
+What it validates:
+
+1. Processed subset load (100-500 rows)
+2. Corpus text construction
+3. Real sentence-transformers embedding runtime
+4. Saved embedding and index artifacts
+5. RetrievalService artifact loading and recipe_id alignment
+6. Query/filter behavior and output-shape sanity checks
+
+Validation mode note:
+
+1. Most pytest coverage uses deterministic/dummy encoders for repeatability and speed.
+2. The medium smoke script is the nontrivial real-runtime integration check.
 
 ---
 

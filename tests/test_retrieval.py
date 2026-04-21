@@ -1,10 +1,309 @@
-"""Tests for retrieval helpers."""
+"""Tests for retrieval integration and utility behavior."""
 
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import pytest
+
+from recipe_discovery.data.load import load_processed_recipes
+from recipe_discovery.data.schema import get_one_hot_tag_columns
+from recipe_discovery.embeddings.index import build_index, load_index, save_index
+from recipe_discovery.embeddings.store import (
+    load_embeddings,
+    load_recipe_ids,
+    save_embeddings,
+    save_recipe_ids,
+)
+from recipe_discovery.retrieval.service import RetrievalRequest, RetrievalService
 from recipe_discovery.retrieval.similarity import cosine_similarity
+
+
+@pytest.fixture(scope="module")
+def processed_df() -> pd.DataFrame:
+    """Load the real processed CSV once for schema-level assertions."""
+    return load_processed_recipes()
+
+
+@pytest.fixture(scope="module")
+def artifact_bundle() -> tuple[np.ndarray, pd.Series]:
+    """Load saved embedding artifacts once for integration checks."""
+    return load_embeddings(), load_recipe_ids()
+
+
+@pytest.fixture
+def toy_service() -> RetrievalService:
+    """Create a minimal loaded service for deterministic search/filter tests."""
+
+    class DummyEncoder:
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            vectors: list[np.ndarray] = []
+            for text in texts:
+                if "alt" in text.lower():
+                    vectors.append(np.array([0.0, 1.0]))
+                else:
+                    vectors.append(np.array([1.0, 0.0]))
+            return np.vstack(vectors)
+
+    service = RetrievalService()
+    service.encoder = DummyEncoder()
+    service.embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.95, 0.05],
+            [0.85, 0.15],
+            [0.7, 0.3],
+            [0.0, 1.0],
+        ]
+    )
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2", "3", "4", "5"],
+            "name": ["A", "B", "C", "D", "E"],
+            "minutes": [10, 20, 25, 35, 50],
+            "n_ingredients": [8, 4, 5, 3, 2],
+            "vegetarian": [0, 0, 1, 1, 0],
+            "vegan": [0, 0, 0, 1, 1],
+            "gluten-free": [0, 0, 1, 0, 1],
+            "5-ingredients-or-less": [0, 1, 1, 1, 1],
+            "15-minutes-or-less": [1, 0, 0, 0, 0],
+            "30-minutes-or-less": [1, 1, 1, 0, 0],
+            "60-minutes-or-less": [1, 1, 1, 1, 1],
+        }
+    )
+    return service
+
+
+def test_processed_csv_loads_successfully(processed_df: pd.DataFrame) -> None:
+    required = {"recipe_id", "name", "description", "ingredients", "steps", "minutes"}
+    assert not processed_df.empty
+    assert required.issubset(set(processed_df.columns))
+
+
+def test_one_hot_tag_columns_detected_correctly(processed_df: pd.DataFrame) -> None:
+    one_hot_cols = get_one_hot_tag_columns(processed_df)
+    assert one_hot_cols
+    assert "vegetarian" in one_hot_cols
+    assert "vegan" in one_hot_cols
+
+
+def test_embeddings_artifacts_can_be_loaded(
+    artifact_bundle: tuple[np.ndarray, pd.Series],
+) -> None:
+    embeddings, recipe_ids = artifact_bundle
+    assert embeddings.ndim == 2
+    assert embeddings.shape[0] > 0
+    assert len(recipe_ids) == embeddings.shape[0]
+
+
+def test_retrieval_service_loads_without_not_implemented(
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_bundle: tuple[np.ndarray, pd.Series],
+) -> None:
+    class FakeRecipeEncoder:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        def load(self) -> None:
+            return None
+
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            return np.zeros((len(texts), 384), dtype=float)
+
+    monkeypatch.setattr("recipe_discovery.retrieval.service.RecipeEncoder", FakeRecipeEncoder)
+
+    service = RetrievalService()
+    service.load()
+
+    embeddings, recipe_ids = artifact_bundle
+    assert service.embeddings is not None
+    assert service.metadata is not None
+    assert service.encoder is not None
+    assert service.embeddings.shape == embeddings.shape
+    assert len(service.metadata) == service.embeddings.shape[0]
+    actual_ids = service.metadata["recipe_id"].astype(str).str.replace(r"\.0+$", "", regex=True)
+    expected_ids = recipe_ids.astype(str).str.replace(r"\.0+$", "", regex=True)
+    assert actual_ids.tolist() == expected_ids.tolist()
+
+
+def test_retrieval_service_load_accepts_path_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRecipeEncoder:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        def load(self) -> None:
+            return None
+
+    monkeypatch.setattr("recipe_discovery.retrieval.service.RecipeEncoder", FakeRecipeEncoder)
+
+    processed = pd.DataFrame(
+        {
+            "recipe_id": ["10", "20", "30"],
+            "name": ["A", "B", "C"],
+            "description": ["d1", "d2", "d3"],
+            "ingredients": ["i1", "i2", "i3"],
+            "steps": ["s1", "s2", "s3"],
+            "minutes": [10, 20, 30],
+            "n_steps": [1, 1, 1],
+            "n_ingredients": [2, 3, 4],
+            "vegetarian": [1, 0, 1],
+        }
+    )
+    processed_path = tmp_path / "processed_subset.csv"
+    processed.to_csv(processed_path, index=False)
+
+    embeddings = np.array([[1.0, 0.0], [0.9, 0.1], [0.8, 0.2]], dtype=float)
+    emb_path = save_embeddings(embeddings, tmp_path / "recipe_embeddings.npy")
+    ids_path = save_recipe_ids(pd.Series(["10", "20", "30"]), tmp_path / "recipe_ids.csv")
+
+    service = RetrievalService()
+    service.load(
+        processed_path=processed_path,
+        embeddings_path=emb_path,
+        recipe_ids_path=ids_path,
+    )
+
+    assert service.encoder is not None
+    assert service.embeddings is not None
+    assert service.metadata is not None
+    assert len(service.metadata) == service.embeddings.shape[0] == 3
+    assert service.metadata["recipe_id"].astype(str).tolist() == ["10", "20", "30"]
+
+
+def test_metadata_alignment_uses_recipe_id_not_accidental_row_order() -> None:
+    service = RetrievalService()
+    metadata = pd.DataFrame(
+        {
+            "recipe_id": ["30", "10", "20"],
+            "name": ["C", "A", "B"],
+            "minutes": [30, 10, 20],
+        }
+    )
+    recipe_ids = pd.Series(["10", "20", "30"])
+    embeddings = np.ones((3, 4), dtype=float)
+
+    aligned = service._align_metadata_by_recipe_id(metadata, recipe_ids, embeddings)
+
+    assert aligned["recipe_id"].tolist() == ["10", "20", "30"]
+    assert aligned["name"].tolist() == ["A", "B", "C"]
+
+
+def test_text_query_returns_ranked_results(toy_service: RetrievalService) -> None:
+    result = toy_service.search(RetrievalRequest(query="quick dinner", top_k=3))
+    assert len(result) == 3
+    assert "similarity_score" in result.columns
+    assert result["similarity_score"].is_monotonic_decreasing
+
+
+def test_dietary_filter_works_on_one_hot_columns(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(query="quick dinner", top_k=1, dietary_filter="vegetarian")
+    )
+    assert len(result) == 1
+    assert int(result.iloc[0]["vegetarian"]) == 1
+    assert result.iloc[0]["recipe_id"] == "3"
+
+
+def test_dietary_filter_supports_gluten_free_label(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(query="quick dinner", top_k=2, dietary_filter="gluten free")
+    )
+
+    assert not result.empty
+    assert (result["gluten-free"] == 1).all()
+
+
+def test_max_time_minutes_filter_works(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(query="quick dinner", top_k=5, max_time_minutes=20)
+    )
+    assert not result.empty
+    assert (result["minutes"] <= 20).all()
+
+
+def test_max_ingredients_filter_works(toy_service: RetrievalService) -> None:
+    result = toy_service.search(RetrievalRequest(query="quick dinner", top_k=5, max_ingredients=4))
+    assert not result.empty
+    assert (result["n_ingredients"] <= 4).all()
+
+
+def test_empty_result_cases_do_not_crash(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(
+            query="quick dinner",
+            top_k=5,
+            dietary_filter="vegan",
+            max_time_minutes=10,
+            max_ingredients=1,
+        )
+    )
+    assert result.empty
+    assert "similarity_score" in result.columns
+
+
+def test_candidate_pool_then_filtering_finds_result_beyond_top_k() -> None:
+    class DummyEncoder:
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = (texts, show_progress)
+            return np.array([[1.0, 0.0]], dtype=float)
+
+    service = RetrievalService()
+    service.encoder = DummyEncoder()
+    service.embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.96, 0.04],
+            [0.4, 0.6],
+            [0.3, 0.7],
+        ]
+    )
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2", "3", "4", "5"],
+            "name": ["A", "B", "C", "D", "E"],
+            "minutes": [20, 20, 20, 20, 20],
+            "n_ingredients": [8, 8, 8, 8, 8],
+            "vegetarian": [0, 0, 1, 0, 0],
+        }
+    )
+
+    result = service.search(
+        RetrievalRequest(query="query", top_k=1, dietary_filter="vegetarian")
+    )
+
+    assert len(result) == 1
+    assert result.iloc[0]["recipe_id"] == "3"
+
+
+def test_direct_cosine_and_saved_index_paths_are_consistent(tmp_path: Path) -> None:
+    embeddings = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.9, 0.1, 0.0],
+            [0.7, 0.3, 0.1],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    query = np.array([1.0, 0.0, 0.0], dtype=float)
+
+    scores = cosine_similarity(query, embeddings)
+    cosine_ranked = np.argsort(-scores)[:3]
+
+    index = build_index(embeddings, n_neighbors=3)
+    index_path = save_index(index, tmp_path / "recipe_index.joblib")
+    loaded_index = load_index(index_path)
+    _, neighbor_idx = loaded_index.kneighbors(query.reshape(1, -1), n_neighbors=3)
+
+    assert neighbor_idx[0].tolist() == cosine_ranked.tolist()
 
 
 def test_cosine_similarity_shape() -> None:
@@ -12,3 +311,10 @@ def test_cosine_similarity_shape() -> None:
     matrix = np.array([[1.0, 0.0], [0.0, 1.0]])
     scores = cosine_similarity(query, matrix)
     assert scores.shape == (2,)
+
+
+def test_cosine_similarity_raises_on_dimension_mismatch() -> None:
+    query = np.array([1.0, 0.0, 0.0])
+    matrix = np.array([[1.0, 0.0], [0.0, 1.0]])
+    with pytest.raises(ValueError, match="Dimension mismatch"):
+        cosine_similarity(query, matrix)

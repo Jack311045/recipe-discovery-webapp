@@ -1,84 +1,140 @@
-# Retrieval Module — Runbook
+# Retrieval Runbook
 
-## Prerequisites
+## Preconditions
 
-1. **Python 3.11+** installed
-2. All dependencies installed: `pip install -r requirements.txt`
-3. The embeddings and index artifacts exist at `data/artifacts/` including `recipe_embeddings.npy`, `recipe_ids.csv`, `recipe_index.joblib`
-4. Run all commands from the **rsepository root** directory
+Run all commands from repository root.
 
----
+Required inputs:
 
-## Step 0: Operate Pipeline
+1. data/processed/Processed_data_updated2.csv
+2. data/artifacts/recipe_embeddings.npy
+3. data/artifacts/recipe_ids.csv
 
-`python scripts/service.py`
+Optional but recommended:
 
-What it does: 
-1. Provides the k-nearest recipes by converting the embeddings into scores 
-2. Employs cosine similarity
-3. Ranks the scores
-4. Implement constraints
+1. data/artifacts/embedding_metadata.json
 
-## Step 1: Core Math Layer
+Install dependencies:
 
-`python scripts/similarity.py`
+1. pip install -r requirements.txt
 
-What it does: 
-1. Takes an already converted array of query and processed CSV 
-2. Compute cosine similarity between query vector and matrix of recipe embeddings
-3. Normalize embeddings
-4. Reduces similarity to dot products
-5. Returns the similarity score for each recipe with the query 
+## Build or Refresh Artifacts
 
-## Step 2: Sorting Layer
+If artifacts are missing or stale:
 
-`python scripts/ranker.py`
+1. python scripts/build_embeddings.py --overwrite
+2. python scripts/build_index.py --overwrite
 
-What it does: 
-1. Makes a copy of the existing processed CSV
-2. Adds a column of the scores associated with the specific recipe
-3. Returns a sorted dataframe with the cosine similarity scores ranked from greatest to least  
+## Run Retrieval Smoke Script
 
-## Step 3: Constraint Layer
+Use the lightweight smoke script:
 
-`python scripts/filters.py`
+1. python scripts/smoke_retrieval.py
 
-What it does: 
-1. Cyphers through the user query and obtains information on potential dietary restrictions, time limit, and ingredient limit
-2. Performs a simple filtering based on the different restrictions given. 
-3. Returns filtered dataframe
+Optional custom queries:
 
-## Common Failure Cases and Mitigation Strategies
+1. python scripts/smoke_retrieval.py --top-k 5 --query "quick vegan dinner" --query "easy pasta" --query "high protein"
 
-### 1. Missing Dependencies
-**Failure Case:** The application fails to run due to missing Python packages.
-**Mitigation:** Ensure all dependencies are listed in `requirements.txt` and run `pip install -r requirements.txt` before executing any scripts.
+Expected behavior:
 
-### 2. Incorrect File Paths
-**Failure Case:** The application cannot find the required data files (e.g., `recipe_embeddings.npy`, `recipe_ids.csv`, `recipe_index.joblib`).
-**Mitigation:** Verify that the files exist in the specified directory (`data/artifacts/`) and that the script is run from the repository root.
+1. Service loads successfully.
+2. Query results include similarity_score.
+3. Results are sorted descending by similarity.
 
-### 3. Invalid Input Data
-**Failure Case:** The input data format is incorrect, leading to runtime errors.
-**Mitigation:** Implement input validation checks to ensure that the data conforms to expected formats before processing.
+## Run Medium-Scale Real-Runtime Smoke
 
-### 4. Memory Issues
-**Failure Case:** The application runs out of memory when processing large datasets.
-**Mitigation:** Optimize data handling by using batch processing or reducing the size of the data being loaded into memory at once.
+Use this before major team handoffs to validate a nontrivial real subset end-to-end.
 
-### 5. Runtime Errors in Scripts
-**Failure Case:** Scripts may throw exceptions due to unforeseen issues in the code.
-**Mitigation:** Wrap critical sections of code in try-except blocks and log errors for easier debugging.
+1. python scripts/smoke_medium_pipeline.py --subset-size 200 --top-k 5
 
-### 6. Performance Bottlenecks
-**Failure Case:** The application runs slowly due to inefficient algorithms.
-**Mitigation:** Profile the code to identify bottlenecks and optimize algorithms, possibly using more efficient data structures or parallel processing.
+What it validates:
 
-### 7. User Input Errors
-**Failure Case:** Users provide invalid or unexpected input during runtime.
-**Mitigation:** Implement robust error handling and user prompts to guide users in providing correct input.
+1. Real processed subset loading (100-500 rows)
+2. Canonical corpus construction
+3. Real model embedding generation
+4. Saved embedding/index artifacts
+5. RetrievalService.load alignment by recipe_id
+6. Query + filter behavior without crashes
 
-### 8. Dependency Version Conflicts
-**Failure Case:** Conflicts arise from incompatible package versions.
-**Mitigation:** Specify exact versions in `requirements.txt` and regularly update dependencies while testing for compatibility.
+## Run Retrieval Tests
 
+1. pytest tests/test_retrieval.py
+
+Covered checks include:
+
+1. Processed CSV loading
+2. One-hot tag detection
+3. Embedding artifact loading
+4. RetrievalService.load integration
+5. Query ranking behavior
+6. dietary_filter behavior on one-hot columns
+7. max_time_minutes behavior
+8. max_ingredients behavior
+9. metadata/embedding row alignment after load
+10. empty-result stability
+
+## How Alignment Works
+
+Service load does not trust raw row order.
+
+It aligns metadata by recipe_id using this sequence:
+
+1. Load metadata CSV.
+2. Load embeddings and recipe_ids artifacts.
+3. Validate row-count parity between embeddings and recipe_ids.
+4. Join metadata onto artifact recipe_ids in artifact order.
+5. Fail fast if artifact IDs are missing in metadata.
+
+## How Filtering Works
+
+Filtering runs on the candidate pool selected by similarity.
+
+Order of operations:
+
+1. Time filter (minutes, or one-hot time bucket fallback)
+2. Ingredient filter (n_ingredients, or 5-ingredients-or-less fallback)
+3. Dietary filter using one-hot tags from schema detection
+
+Dietary notes:
+
+1. Input is matched against one-hot tag column names (not a tags text field).
+2. Multi-value input like "vegetarian, gluten-free" is supported.
+
+## Direct Cosine vs Saved Index
+
+Live RetrievalService search currently uses direct cosine scoring on the embedding matrix.
+
+1. This is the intended final behavior for now because candidate-pool selection and filtering are applied in that path.
+2. recipe_index.joblib remains a supported artifact for offline checks and future acceleration work.
+3. Consistency between both paths is covered by retrieval tests.
+
+Validation mode note:
+
+1. Most pytest retrieval tests use deterministic encoders for repeatability.
+2. scripts/smoke_medium_pipeline.py uses real sentence-transformers runtime for medium-scale integration confidence.
+
+## Common Failure Cases and Debugging
+
+1. Error: Processed CSV not found
+Cause: data/processed/Processed_data_updated2.csv missing.
+Fix: regenerate or place the processed CSV in data/processed.
+
+2. Error: Embedding artifacts missing
+Cause: build_embeddings was not run or artifacts were removed.
+Fix: run python scripts/build_embeddings.py.
+
+3. Error: embeddings/recipe_ids row mismatch
+Cause: partial artifact refresh or manual edits.
+Fix: rebuild embeddings so .npy and recipe_ids.csv are produced together.
+
+4. Error: Missing artifact recipe_ids in processed metadata
+Cause: processed CSV and artifacts came from different dataset versions.
+Fix: rebuild embeddings from the same processed CSV currently in use.
+
+5. Empty results for filtered query
+Cause: filters are stricter than available candidate rows.
+Fix: relax dietary_filter, max_time_minutes, or max_ingredients, or increase top_k.
+
+6. Encoder load failure
+Cause: sentence-transformers not installed or model download/network issue.
+Fix: install requirements and retry in an environment with model download access.
