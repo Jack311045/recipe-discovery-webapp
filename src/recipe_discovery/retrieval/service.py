@@ -50,5 +50,6 @@ class RetrievalService:
             results,
             dietary_filter=request.dietary_filter,
             max_time_minutes=request.max_time_minutes,
+            max_ingreidents=request.max_ingreidents,
         )
         return results.reset_index(drop=True)
