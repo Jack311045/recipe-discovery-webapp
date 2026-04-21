@@ -174,13 +174,31 @@ class RetrievalService:
             self.embeddings.shape[0],
         )
 
-    def _search_candidates(
-        self,
-        request: RetrievalRequest,
-        *,
-        limit_to_top_k: bool,
-    ) -> pd.DataFrame:
-        """Return similarity-ranked filtered candidates for a query."""
+        # Attach 2D projections if available
+        projections_path = ARTIFACTS_DIR / "projections_2d.npy"
+        pca_projections_path = ARTIFACTS_DIR / "pca_projection.npy"
+        
+        proj_file = projections_path if projections_path.exists() else pca_projections_path
+        if proj_file.exists():
+            try:
+                proj_array = np.load(proj_file)
+                if len(proj_array) == len(self.metadata):
+                    self.metadata["x_proj"] = proj_array[:, 0]
+                    self.metadata["y_proj"] = proj_array[:, 1]
+                    logger.info("Loaded 2D projections from %s", proj_file)
+                else:
+                    logger.warning("Projection shape mismatch. Skipping 2D coords.")
+            except Exception as e:
+                logger.error("Failed to load projections: %s", e)
+        else:
+            logger.warning("No 2D projections found in artifacts.")
+
+    def search(self, request: RetrievalRequest) -> pd.DataFrame:
+        """Return filtered top-k recipe matches for a query.
+
+        This v1 runtime path intentionally performs direct cosine scoring
+        against the loaded embedding matrix before candidate-pool filtering.
+        """
         if self.encoder is None or self.embeddings is None or self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 

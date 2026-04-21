@@ -2,33 +2,54 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
+import joblib
 import numpy as np
+from sklearn.decomposition import PCA
+
+from recipe_discovery.reduction.base import BaseReducer
+from recipe_discovery.reduction.utils import normalize_embeddings
+
+logger = logging.getLogger(__name__)
 
 
-class PCAProjector:
-    """Small PCA implementation using SVD."""
+class PCAReducer(BaseReducer):
+    """PCA implementation using sklearn."""
 
     def __init__(self, n_components: int = 2) -> None:
         self.n_components = n_components
-        self.components_: np.ndarray | None = None
-        self.mean_: np.ndarray | None = None
+        self.model = PCA(n_components=n_components)
+        self.is_fitted = False
 
-    def fit(self, x: np.ndarray) -> "PCAProjector":
+    def fit(self, embeddings: np.ndarray) -> None:
         """Fit PCA directions."""
-        self.mean_ = x.mean(axis=0, keepdims=True)
-        centered = x - self.mean_
-        _, _, vt = np.linalg.svd(centered, full_matrices=False)
-        self.components_ = vt[: self.n_components]
-        return self
+        normalized = normalize_embeddings(embeddings)
+        self.model.fit(normalized)
+        self.is_fitted = True
+        logger.info(
+            "PCA fitted. Explained variance ratio: %s (Total: %.2f%%)",
+            self.model.explained_variance_ratio_,
+            sum(self.model.explained_variance_ratio_) * 100,
+        )
 
-    def transform(self, x: np.ndarray) -> np.ndarray:
+    def transform(self, embeddings: np.ndarray) -> np.ndarray:
         """Project data to low-dimensional space."""
-        if self.components_ is None or self.mean_ is None:
-            raise RuntimeError("PCAProjector is not fitted.")
-        centered = x - self.mean_
-        return centered @ self.components_.T
+        if not self.is_fitted:
+            raise RuntimeError("PCAReducer is not fitted.")
+        normalized = normalize_embeddings(embeddings)
+        return self.model.transform(normalized)
 
-    def fit_transform(self, x: np.ndarray) -> np.ndarray:
-        """Fit PCA and return the projected coordinates."""
-        self.fit(x)
-        return self.transform(x)
+    def save_checkpoint(self, path: str | Path) -> None:
+        """Save the fitted model."""
+        if not self.is_fitted:
+            raise RuntimeError("Cannot save unfitted model.")
+        joblib.dump(self.model, path)
+        logger.info("Saved PCAReducer to %s", path)
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load a fitted model."""
+        self.model = joblib.load(path)
+        self.is_fitted = True
+        logger.info("Loaded PCAReducer from %s", path)
