@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,9 @@ from recipe_discovery.data.load import load_processed_recipes
 from recipe_discovery.data.schema import ID_COLUMN
 from recipe_discovery.embeddings.encoder import EmbeddingConfig, RecipeEncoder
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
+from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.filters import apply_basic_filters
+from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
 from recipe_discovery.settings import ARTIFACTS_DIR
 
@@ -171,12 +174,13 @@ class RetrievalService:
             self.embeddings.shape[0],
         )
 
-    def search(self, request: RetrievalRequest) -> pd.DataFrame:
-        """Return filtered top-k recipe matches for a query.
-
-        This v1 runtime path intentionally performs direct cosine scoring
-        against the loaded embedding matrix before candidate-pool filtering.
-        """
+    def _search_candidates(
+        self,
+        request: RetrievalRequest,
+        *,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return similarity-ranked filtered candidates for a query."""
         if self.encoder is None or self.embeddings is None or self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
@@ -207,8 +211,86 @@ class RetrievalService:
         if filtered.empty:
             return filtered
 
-        return (
-            filtered.sort_values("similarity_score", ascending=False)
-            .head(request.top_k)
-            .reset_index(drop=True)
+        ranked = filtered.sort_values("similarity_score", ascending=False)
+        if limit_to_top_k:
+            ranked = ranked.head(request.top_k)
+
+        return ranked.reset_index(drop=True)
+
+    @staticmethod
+    def load_regression_model(
+        regression_model_path: Path | None = None,
+    ) -> RecipeRegressor | None:
+        """Load an optional regression model artifact if present.
+
+        If the artifact path does not exist, ``None`` is returned so callers can
+        safely fall back to similarity-only ranking.
+        """
+        model_path = Path(regression_model_path or (ARTIFACTS_DIR / "regressor.joblib"))
+        if not model_path.exists():
+            return None
+        return RecipeRegressor.load(model_path)
+
+    def rerank_candidates(
+        self,
+        candidates: pd.DataFrame,
+        *,
+        regression_model: object | None = None,
+        feature_columns: Sequence[str] | None = None,
+        similarity_weight: float = 0.8,
+        rating_weight: float = 0.2,
+        regression_model_path: Path | None = None,
+    ) -> pd.DataFrame:
+        """Optionally rerank candidate rows using a regression quality signal.
+
+        This method is additive by design. If no regression model is available,
+        similarity-first ranking is preserved.
+        """
+        model = regression_model
+        if model is None and regression_model_path is not None:
+            model = self.load_regression_model(regression_model_path)
+
+        return compute_combined_ranking(
+            candidates,
+            regression_model=model,
+            feature_columns=feature_columns,
+            similarity_weight=similarity_weight,
+            rating_weight=rating_weight,
         )
+
+    def search_with_optional_rerank(
+        self,
+        request: RetrievalRequest,
+        *,
+        regression_model: object | None = None,
+        feature_columns: Sequence[str] | None = None,
+        similarity_weight: float = 0.8,
+        rating_weight: float = 0.2,
+        regression_model_path: Path | None = None,
+    ) -> pd.DataFrame:
+        """Search then optionally rerank with regression as an additive layer.
+
+        Official default runtime remains similarity-first and is exposed by
+        :meth:`search`. This method is an explicit optional integration path.
+        """
+        candidates = self._search_candidates(request, limit_to_top_k=False)
+        if candidates.empty:
+            return candidates
+
+        reranked = self.rerank_candidates(
+            candidates,
+            regression_model=regression_model,
+            feature_columns=feature_columns,
+            similarity_weight=similarity_weight,
+            rating_weight=rating_weight,
+            regression_model_path=regression_model_path,
+        )
+        return reranked.head(request.top_k).reset_index(drop=True)
+
+    def search(self, request: RetrievalRequest) -> pd.DataFrame:
+        """Return filtered top-k recipe matches for a query.
+
+        This v1 runtime path intentionally performs direct cosine scoring
+        against the loaded embedding matrix before candidate-pool filtering.
+        """
+        return self._search_candidates(request, limit_to_top_k=True)

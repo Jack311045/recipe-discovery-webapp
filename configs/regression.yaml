@@ -1,12 +1,22 @@
 regression:
-  target_column: avg_rating
+  target_column: rating
   feature_columns:
+    - minutes
+    - n_steps
+    - n_ingredients
     - calories
-    - protein
-    - fat
+    - total fat
     - sugar
     - sodium
-    - ingredient_count
-    - step_count
-    - minutes
+    - protein
+    - saturated fat
+    - carbohydrates
+  min_num_ratings: null
+  use_sample_weight: false
+  alpha: 1.0
+  test_size: 0.1
+  val_size: 0.1
+  random_state: 42
   output_path: data/artifacts/regressor.joblib
+  metadata_path: data/artifacts/regression_metadata.json
+  holdout_predictions_path: data/artifacts/regression_holdout_predictions.csv

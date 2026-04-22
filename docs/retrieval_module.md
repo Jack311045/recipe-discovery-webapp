@@ -4,6 +4,8 @@
 
 The retrieval module serves semantic recipe search using precomputed embedding artifacts.
 
+Official runtime default remains similarity-first semantic search.
+
 High-level flow:
 
 1. Load processed metadata from data/processed/Processed_data_updated2.csv.
@@ -24,6 +26,11 @@ Retrieval depends on artifacts built by the embeddings pipeline:
 Optional artifact not required at query time:
 
 1. data/artifacts/recipe_texts.csv
+
+Optional reranking artifacts:
+
+1. data/artifacts/regressor.joblib
+1. data/artifacts/regression_metadata.json (recommended source of feature column names)
 
 Important contract:
 
@@ -88,6 +95,34 @@ Search algorithm:
 6. Re-sort filtered rows by similarity_score and return final top_k.
 
 This avoids the common failure mode where filtering is applied only after truncating to top_k too early.
+
+## Optional Regression Reranking Path
+
+Implementation location:
+
+1. src/recipe_discovery/retrieval/service.py
+1. src/recipe_discovery/retrieval/ranker.py
+
+Optional API path:
+
+1. RetrievalService.search_with_optional_rerank
+
+Behavior contract:
+
+1. search remains the official default runtime path.
+1. Reranking is additive and explicit opt-in only.
+1. If no regression model is provided (or no path is passed), similarity-only ordering is preserved.
+1. similarity_score is retained in output for transparency and debugging.
+
+When to use reranking:
+
+1. You already have semantically relevant candidates and want to bias ordering toward predicted recipe quality.
+1. You can provide a trained regressor artifact plus valid feature columns present in candidate rows.
+
+When to skip reranking:
+
+1. No trained regressor is available.
+1. Candidate rows do not include required regression feature columns.
 
 ## Index Usage Status
 

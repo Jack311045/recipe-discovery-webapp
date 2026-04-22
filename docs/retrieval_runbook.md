@@ -113,6 +113,26 @@ Validation mode note:
 1. Most pytest retrieval tests use deterministic encoders for repeatability.
 2. scripts/smoke_medium_pipeline.py uses real sentence-transformers runtime for medium-scale integration confidence.
 
+## Optional Regression Reranking
+
+Default behavior remains similarity-first retrieval. Optional reranking is an additive post-search step.
+
+Required inputs for reranking:
+
+1. Candidate rows from RetrievalService.search or RetrievalService.search_with_optional_rerank.
+1. data/artifacts/regressor.joblib (or explicit custom model path).
+1. Feature column names present in candidate rows, typically from regression metadata.
+
+Recommended artifact source for feature columns:
+
+1. data/artifacts/regression_metadata.json -> feature_columns
+
+Operational notes:
+
+1. If regression model is omitted, results fall back to similarity-only ordering.
+1. similarity_score is preserved even when reranking is enabled.
+1. Missing feature columns should fail with an explicit error instead of silently degrading behavior.
+
 ## Common Failure Cases and Debugging
 
 1. Error: Processed CSV not found

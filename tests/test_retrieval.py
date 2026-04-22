@@ -17,6 +17,7 @@ from recipe_discovery.embeddings.store import (
     save_embeddings,
     save_recipe_ids,
 )
+from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.service import RetrievalRequest, RetrievalService
 from recipe_discovery.retrieval.similarity import cosine_similarity
 
@@ -75,6 +76,17 @@ def toy_service() -> RetrievalService:
         }
     )
     return service
+
+
+def _train_tiny_regressor(df: pd.DataFrame, feature_columns: list[str]) -> RecipeRegressor:
+    x = df.loc[:, feature_columns].to_numpy(dtype=float)
+    y = (
+        0.02 * df["minutes"].to_numpy(dtype=float)
+        + 0.15 * df["n_ingredients"].to_numpy(dtype=float)
+    )
+    model = RecipeRegressor(alpha=1.0)
+    model.fit(x, y)
+    return model
 
 
 def test_processed_csv_loads_successfully(processed_df: pd.DataFrame) -> None:
@@ -281,6 +293,231 @@ def test_candidate_pool_then_filtering_finds_result_beyond_top_k() -> None:
 
     assert len(result) == 1
     assert result.iloc[0]["recipe_id"] == "3"
+
+
+def test_search_with_optional_rerank_falls_back_to_similarity_only(
+    toy_service: RetrievalService,
+) -> None:
+    request = RetrievalRequest(query="quick dinner", top_k=4)
+    base = toy_service.search(request)
+    fallback = toy_service.search_with_optional_rerank(request)
+
+    assert fallback["recipe_id"].tolist() == base["recipe_id"].tolist()
+    np.testing.assert_allclose(
+        fallback["similarity_score"].to_numpy(dtype=float),
+        base["similarity_score"].to_numpy(dtype=float),
+    )
+    assert "combined_score" in fallback.columns
+    assert "predicted_rating" not in fallback.columns
+    assert fallback["similarity_score"].is_monotonic_decreasing
+
+
+def test_rerank_candidates_no_model_does_not_crash(
+    toy_service: RetrievalService,
+) -> None:
+    candidates = toy_service.search(RetrievalRequest(query="quick dinner", top_k=4))
+    reranked = toy_service.rerank_candidates(
+        candidates,
+        regression_model=None,
+        feature_columns=None,
+    )
+
+    assert not reranked.empty
+    assert "combined_score" in reranked.columns
+    assert "predicted_rating" not in reranked.columns
+
+
+def test_rerank_candidates_adds_prediction_columns_and_preserves_similarity(
+    toy_service: RetrievalService,
+) -> None:
+    feature_columns = ["minutes", "n_ingredients"]
+    model = _train_tiny_regressor(toy_service.metadata, feature_columns)
+    candidates = toy_service.search(RetrievalRequest(query="quick dinner", top_k=4))
+
+    reranked_a = toy_service.rerank_candidates(
+        candidates,
+        regression_model=model,
+        feature_columns=feature_columns,
+        similarity_weight=0.7,
+        rating_weight=0.3,
+    )
+    reranked_b = toy_service.rerank_candidates(
+        candidates,
+        regression_model=model,
+        feature_columns=feature_columns,
+        similarity_weight=0.7,
+        rating_weight=0.3,
+    )
+
+    pd.testing.assert_frame_equal(reranked_a, reranked_b)
+    assert {"similarity_score", "predicted_rating", "combined_score"}.issubset(
+        set(reranked_a.columns)
+    )
+    assert sorted(reranked_a["similarity_score"].tolist()) == sorted(
+        candidates["similarity_score"].tolist()
+    )
+
+
+def test_rerank_candidates_missing_feature_columns_fails_clearly(
+    toy_service: RetrievalService,
+) -> None:
+    feature_columns = ["minutes", "n_ingredients"]
+    model = _train_tiny_regressor(toy_service.metadata, feature_columns)
+    candidates = toy_service.search(RetrievalRequest(query="quick dinner", top_k=4)).drop(
+        columns=["minutes"]
+    )
+
+    with pytest.raises(ValueError, match="Missing feature columns"):
+        toy_service.rerank_candidates(
+            candidates,
+            regression_model=model,
+            feature_columns=feature_columns,
+        )
+
+
+def test_retrieval_service_loads_regression_artifact_and_scores_candidates(
+    toy_service: RetrievalService,
+    tmp_path: Path,
+) -> None:
+    feature_columns = ["minutes", "n_ingredients"]
+    model = _train_tiny_regressor(toy_service.metadata, feature_columns)
+    model_path = tmp_path / "regressor.joblib"
+    model.save(model_path)
+
+    loaded_model = RetrievalService.load_regression_model(model_path)
+    assert loaded_model is not None
+
+    candidates = toy_service.search(RetrievalRequest(query="quick dinner", top_k=4))
+    reranked = toy_service.rerank_candidates(
+        candidates,
+        regression_model=loaded_model,
+        feature_columns=feature_columns,
+    )
+    assert "predicted_rating" in reranked.columns
+    assert len(reranked) == len(candidates)
+
+
+def test_retrieval_service_regression_model_roundtrip_stable_for_ranking_use(
+    toy_service: RetrievalService,
+    tmp_path: Path,
+) -> None:
+    feature_columns = ["minutes", "n_ingredients"]
+    model = _train_tiny_regressor(toy_service.metadata, feature_columns)
+    model_path = tmp_path / "regressor.joblib"
+    model.save(model_path)
+    loaded = RetrievalService.load_regression_model(model_path)
+    assert loaded is not None
+
+    candidates = toy_service.search(RetrievalRequest(query="quick dinner", top_k=4))
+    ranked_original = toy_service.rerank_candidates(
+        candidates,
+        regression_model=model,
+        feature_columns=feature_columns,
+    )
+    ranked_loaded = toy_service.rerank_candidates(
+        candidates,
+        regression_model=loaded,
+        feature_columns=feature_columns,
+    )
+
+    np.testing.assert_allclose(
+        ranked_original["predicted_rating"].to_numpy(dtype=float),
+        ranked_loaded["predicted_rating"].to_numpy(dtype=float),
+    )
+    np.testing.assert_allclose(
+        ranked_original["combined_score"].to_numpy(dtype=float),
+        ranked_loaded["combined_score"].to_numpy(dtype=float),
+    )
+
+
+def test_load_regression_model_returns_none_when_artifact_missing(tmp_path: Path) -> None:
+    assert RetrievalService.load_regression_model(tmp_path / "missing_regressor.joblib") is None
+
+
+def test_end_to_end_optional_rerank_smoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRecipeEncoder:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        def load(self) -> None:
+            return None
+
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            vectors: list[np.ndarray] = []
+            for text in texts:
+                if "alt" in text.lower():
+                    vectors.append(np.array([0.0, 1.0], dtype=float))
+                else:
+                    vectors.append(np.array([1.0, 0.0], dtype=float))
+            return np.vstack(vectors)
+
+    monkeypatch.setattr("recipe_discovery.retrieval.service.RecipeEncoder", FakeRecipeEncoder)
+
+    processed = pd.DataFrame(
+        {
+            "recipe_id": ["10", "20", "30", "40"],
+            "name": ["A", "B", "C", "D"],
+            "description": ["d1", "d2", "d3", "d4"],
+            "ingredients": ["i1", "i2", "i3", "i4"],
+            "steps": ["s1", "s2", "s3", "s4"],
+            "minutes": [10.0, 20.0, 35.0, 45.0],
+            "n_steps": [1.0, 2.0, 3.0, 4.0],
+            "n_ingredients": [3.0, 5.0, 7.0, 4.0],
+            "vegetarian": [1, 0, 1, 0],
+        }
+    )
+    processed_path = tmp_path / "processed_subset.csv"
+    processed.to_csv(processed_path, index=False)
+
+    embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.95, 0.05],
+            [0.7, 0.3],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    embeddings_path = save_embeddings(embeddings, tmp_path / "recipe_embeddings.npy")
+    recipe_ids_path = save_recipe_ids(
+        pd.Series(["10", "20", "30", "40"]),
+        tmp_path / "recipe_ids.csv",
+    )
+
+    service = RetrievalService()
+    service.load(
+        processed_path=processed_path,
+        embeddings_path=embeddings_path,
+        recipe_ids_path=recipe_ids_path,
+    )
+
+    request = RetrievalRequest(query="quick dinner", top_k=3)
+    candidates = service.search(request)
+    assert not candidates.empty
+    assert "similarity_score" in candidates.columns
+
+    feature_columns = ["minutes", "n_ingredients"]
+    model = _train_tiny_regressor(processed, feature_columns)
+    model_path = tmp_path / "regressor.joblib"
+    model.save(model_path)
+
+    reranked = service.search_with_optional_rerank(
+        request,
+        regression_model_path=model_path,
+        feature_columns=feature_columns,
+        similarity_weight=0.7,
+        rating_weight=0.3,
+    )
+
+    assert not reranked.empty
+    assert len(reranked) <= request.top_k
+    assert {"similarity_score", "predicted_rating", "combined_score"}.issubset(
+        set(reranked.columns)
+    )
 
 
 def test_direct_cosine_and_saved_index_paths_are_consistent(tmp_path: Path) -> None:
