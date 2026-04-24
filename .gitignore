@@ -41,3 +41,5 @@ data/artifacts/*
 
 # Jupyter
 .ipynb_checkpoints/
+*.csv.zip
+Processed_data_updated2.csv.zip

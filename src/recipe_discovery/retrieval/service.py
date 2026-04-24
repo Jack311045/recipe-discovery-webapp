@@ -193,6 +193,27 @@ class RetrievalService:
         else:
             logger.warning("No 2D projections found in artifacts.")
 
+    def get_all_projections(self) -> pd.DataFrame:
+        """Return all available 2D projections for the background scatter plot.
+        
+        Returns a DataFrame with ['recipe_id', 'x_proj', 'y_proj'].
+        Returns an empty DataFrame if projections are not loaded.
+        """
+        if self.metadata is None or "x_proj" not in self.metadata.columns:
+            return pd.DataFrame(columns=[ID_COLUMN, "x_proj", "y_proj"])
+            
+        # Return only the rows that actually have projection coordinates
+        has_proj = self.metadata["x_proj"].notna()
+        cols = [ID_COLUMN, "x_proj", "y_proj"]
+        
+        # We also might want to return title or other metadata for tooltips, but the spec
+        # specifically requested the background points. Adding title to be safe for UI.
+        if "name" in self.metadata.columns:
+            cols.append("name")
+            
+        return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
+
+
     def search(self, request: RetrievalRequest) -> pd.DataFrame:
         """Return filtered top-k recipe matches for a query.
 

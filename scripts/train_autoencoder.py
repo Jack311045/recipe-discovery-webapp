@@ -13,7 +13,9 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from recipe_discovery.reduction.autoencoder import AutoencoderReducer
 from recipe_discovery.reduction.config import AutoencoderConfig
-from recipe_discovery.reduction.utils import normalize_embeddings
+from recipe_discovery.reduction.autoencoder import AutoencoderReducer
+from recipe_discovery.reduction.config import AutoencoderConfig
+from recipe_discovery.reduction.utils import normalize_embeddings, get_checkpoint_hash
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,60 +75,67 @@ def train_autoencoder(args: argparse.Namespace) -> None:
     )
     criterion = nn.MSELoss()
     
-    best_val_loss = float("inf")
+    config_str = str(config.__dict__)
+    checkpoint_hash = get_checkpoint_hash(args.embeddings_path, config_str)
+    
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    weights_path = output_dir / "autoencoder_weights.pt"
+    weights_path = output_dir / f"autoencoder_{checkpoint_hash}.pt"
+    proj_path = output_dir / "projections_2d.npy"
     
-    logger.info("Starting training on %s", device)
-    
-    for epoch in range(config.epochs):
-        model.train()
-        train_loss = 0.0
+    if weights_path.exists():
+        logger.info("Found cached model with hash %s. Skipping training.", checkpoint_hash)
+        reducer.load_checkpoint(weights_path)
+    else:
+        logger.info("Starting training on %s", device)
+        best_val_loss = float("inf")
         
-        for (batch,) in train_loader:
-            batch = batch.to(device)
-            optimizer.zero_grad()
+        for epoch in range(config.epochs):
+            model.train()
+            train_loss = 0.0
             
-            if args.denoise:
-                noise = torch.randn_like(batch) * config.noise_std
-                noisy_input = batch + noise
-                reconstructed = model(noisy_input)
-            else:
-                reconstructed = model(batch)
-                
-            loss = criterion(reconstructed, batch)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * len(batch)
-            
-        train_loss /= len(train_idx)
-        
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for (batch,) in val_loader:
+            for (batch,) in train_loader:
                 batch = batch.to(device)
-                reconstructed = model(batch)
-                loss = criterion(reconstructed, batch)
-                val_loss += loss.item() * len(batch)
+                optimizer.zero_grad()
                 
-        val_loss /= len(val_idx)
-        scheduler.step(val_loss)
-        
-        logger.info(
-            "Epoch %d/%d - Train Loss: %.6f - Val Loss: %.6f",
-            epoch + 1, config.epochs, train_loss, val_loss
-        )
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            reducer.save_checkpoint(weights_path)
+                if args.denoise:
+                    noise = torch.randn_like(batch) * config.noise_std
+                    noisy_input = batch + noise
+                    reconstructed = model(noisy_input)
+                else:
+                    reconstructed = model(batch)
+                    
+                loss = criterion(reconstructed, batch)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * len(batch)
+                
+            train_loss /= len(train_idx)
             
-    logger.info("Training complete. Best val loss: %.6f", best_val_loss)
-    
-    # Reload best model and generate full projections
-    reducer.load_checkpoint(weights_path)
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for (batch,) in val_loader:
+                    batch = batch.to(device)
+                    reconstructed = model(batch)
+                    loss = criterion(reconstructed, batch)
+                    val_loss += loss.item() * len(batch)
+                    
+            val_loss /= len(val_idx)
+            scheduler.step(val_loss)
+            
+            logger.info(
+                "Epoch %d/%d - Train Loss: %.6f - Val Loss: %.6f",
+                epoch + 1, config.epochs, train_loss, val_loss
+            )
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                reducer.save_checkpoint(weights_path)
+                
+        logger.info("Training complete. Best val loss: %.6f", best_val_loss)
+        reducer.load_checkpoint(weights_path)
+        
     logger.info("Generating 2D projections for all data...")
     projections_2d = reducer.transform(embeddings)
     
@@ -134,10 +143,9 @@ def train_autoencoder(args: argparse.Namespace) -> None:
     np.save(proj_path, projections_2d)
     logger.info("Saved projections to %s", proj_path)
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Autoencoder Reducer")
-    parser.add_argument("--embeddings_path", type=str, default="data/artifacts/embeddings.npy")
+    parser.add_argument("--embeddings_path", type=str, default="data/artifacts/recipe_embeddings.npy")
     parser.add_argument("--output_dir", type=str, default="data/artifacts")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=256)
@@ -148,7 +156,6 @@ def main() -> None:
     
     args = parser.parse_args()
     train_autoencoder(args)
-
 
 if __name__ == "__main__":
     main()

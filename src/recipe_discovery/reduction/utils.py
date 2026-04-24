@@ -19,6 +19,12 @@ def normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     return embeddings / np.clip(norms, a_min=1e-10, a_max=None)
 
+def get_checkpoint_hash(embeddings_path: str, config_str: str) -> str:
+    """Generate a hash for caching models based on input data and config."""
+    import hashlib
+    combined = f"{embeddings_path}_{config_str}"
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:8]
+
 
 def procrustes_similarity(pca_2d: np.ndarray, ae_2d: np.ndarray) -> float:
     """Align AE projections to PCA via Procrustes and return residual similarity score.
