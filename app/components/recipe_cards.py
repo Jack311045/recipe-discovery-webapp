@@ -10,6 +10,7 @@ import streamlit as st
 def render_recipe_card(recipe: Mapping[str, object], rank: int | None = None) -> None:
     """Render a recipe result card with key metadata."""
     title = str(recipe.get("name", recipe.get("title", "Untitled recipe")))
+    image_url = recipe.get("image_url")
     score = recipe.get("similarity_score")
     minutes = recipe.get("minutes")
     n_ingredients = recipe.get("n_ingredients")
@@ -19,6 +20,9 @@ def render_recipe_card(recipe: Mapping[str, object], rank: int | None = None) ->
     y_proj = recipe.get("y_proj")
 
     with st.container(border=True):
+        if image_url:
+            st.image(str(image_url), use_container_width=True)
+
         header = f"**{rank}. {title}**" if rank is not None else f"**{title}**"
         cols = st.columns([4, 1])
         with cols[0]:
