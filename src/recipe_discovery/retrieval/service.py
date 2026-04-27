@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -12,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from recipe_discovery.data.load import load_processed_recipes
-from recipe_discovery.data.schema import ID_COLUMN
+from recipe_discovery.data.schema import ID_COLUMN, get_one_hot_tag_columns
 from recipe_discovery.embeddings.encoder import EmbeddingConfig, RecipeEncoder
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.models.regression import RecipeRegressor
@@ -22,6 +23,9 @@ from recipe_discovery.retrieval.similarity import cosine_similarity
 from recipe_discovery.settings import ARTIFACTS_DIR
 
 logger = logging.getLogger(__name__)
+
+_SMALL_ARTIFACT_WARN_THRESHOLD = 5000
+_EXACT_TAG_SCORE_BOOST = 1.0
 
 
 @dataclass
@@ -47,6 +51,7 @@ class RetrievalService:
         self.encoder = None
         self.embeddings: np.ndarray | None = None
         self.metadata: pd.DataFrame | None = None
+        self.one_hot_tag_columns: list[str] = []
 
     @staticmethod
     def _normalize_recipe_ids(values: pd.Series) -> pd.Series:
@@ -54,6 +59,46 @@ class RetrievalService:
         text = values.astype(str).str.strip()
         # CSV parsing can represent integer IDs as float-like strings (for example "58.0").
         return text.str.replace(r"\.0+$", "", regex=True)
+
+    @staticmethod
+    def _normalize_token(value: str) -> str:
+        """Normalize label/query text for robust one-hot tag matching."""
+        return re.sub(r"[^a-z0-9]+", "-", value.lower().strip()).strip("-")
+
+    def _resolve_query_tag_column(self, query: str, df: pd.DataFrame) -> str | None:
+        """Resolve exact/near-exact query intent to a known one-hot tag column."""
+        normalized_query = self._normalize_token(query)
+        if not normalized_query:
+            return None
+
+        tag_columns = self.one_hot_tag_columns or get_one_hot_tag_columns(df)
+        if not tag_columns:
+            return None
+
+        normalized_to_col = {
+            self._normalize_token(col): col for col in tag_columns
+        }
+
+        if normalized_query in normalized_to_col:
+            return normalized_to_col[normalized_query]
+
+        # Near-exact tolerance for singular/plural and common query suffixes.
+        candidates = {normalized_query}
+        if normalized_query.endswith("s") and len(normalized_query) > 1:
+            candidates.add(normalized_query[:-1])
+        else:
+            candidates.add(f"{normalized_query}s")
+
+        for suffix in ("-recipe", "-recipes", "-food", "-foods", "-dish", "-dishes"):
+            if normalized_query.endswith(suffix):
+                trimmed = normalized_query[: -len(suffix)]
+                if trimmed:
+                    candidates.add(trimmed)
+
+        for candidate in candidates:
+            if candidate in normalized_to_col:
+                return normalized_to_col[candidate]
+        return None
 
     def _get_encoder_config(self) -> EmbeddingConfig:
         """Build encoder config, preferring saved embedding metadata when present."""
@@ -163,6 +208,7 @@ class RetrievalService:
 
         self.metadata = self._align_metadata_by_recipe_id(metadata, recipe_ids, embeddings)
         self.embeddings = embeddings
+        self.one_hot_tag_columns = get_one_hot_tag_columns(self.metadata)
 
         encoder_config = self._get_encoder_config()
         self.encoder = RecipeEncoder(config=encoder_config)
@@ -173,6 +219,17 @@ class RetrievalService:
             len(self.metadata),
             self.embeddings.shape[0],
         )
+        logger.info(
+            "Detected %d one-hot tag columns for retrieval intent matching.",
+            len(self.one_hot_tag_columns),
+        )
+
+        if self.embeddings.shape[0] < _SMALL_ARTIFACT_WARN_THRESHOLD:
+            logger.warning(
+                "Embedding artifact is a tiny subset (%d rows). Search quality for broad "
+                "queries may be poor. Rebuild embeddings without --limit for full coverage.",
+                self.embeddings.shape[0],
+            )
 
         # Attach 2D projections if available
         projections_path = ARTIFACTS_DIR / "projections_2d.npy"
@@ -212,14 +269,13 @@ class RetrievalService:
             cols.append("name")
             
         return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
-
-
-    def search(self, request: RetrievalRequest) -> pd.DataFrame:
-        """Return filtered top-k recipe matches for a query.
-
-        This v1 runtime path intentionally performs direct cosine scoring
-        against the loaded embedding matrix before candidate-pool filtering.
-        """
+    def _search_candidates(
+        self,
+        request: RetrievalRequest,
+        *,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return similarity-ranked filtered candidates for a query."""
         if self.encoder is None or self.embeddings is None or self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
@@ -250,7 +306,28 @@ class RetrievalService:
         if filtered.empty:
             return filtered
 
-        ranked = filtered.sort_values("similarity_score", ascending=False)
+        matched_tag_col = self._resolve_query_tag_column(request.query, filtered)
+        if matched_tag_col and matched_tag_col in filtered.columns:
+            ranked = filtered.copy()
+            ranked["query_tag_match"] = (
+                pd.to_numeric(ranked[matched_tag_col], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .eq(1)
+                .astype(int)
+            )
+            ranked["matched_query_tag"] = matched_tag_col
+            ranked["boosted_similarity_score"] = (
+                ranked["similarity_score"]
+                + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
+            )
+            ranked = ranked.sort_values(
+                ["boosted_similarity_score", "similarity_score"],
+                ascending=False,
+            )
+        else:
+            ranked = filtered.sort_values("similarity_score", ascending=False)
+
         if limit_to_top_k:
             ranked = ranked.head(request.top_k)
 

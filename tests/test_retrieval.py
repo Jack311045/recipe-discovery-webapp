@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +70,9 @@ def toy_service() -> RetrievalService:
             "vegetarian": [0, 0, 1, 1, 0],
             "vegan": [0, 0, 0, 1, 1],
             "gluten-free": [0, 0, 1, 0, 1],
+            "korean": [0, 0, 0, 1, 0],
+            "italian": [1, 0, 0, 0, 0],
+            "desserts": [0, 0, 1, 0, 0],
             "5-ingredients-or-less": [0, 1, 1, 1, 1],
             "15-minutes-or-less": [1, 0, 0, 0, 0],
             "30-minutes-or-less": [1, 1, 1, 0, 0],
@@ -189,6 +193,55 @@ def test_retrieval_service_load_accepts_path_overrides(
     assert service.metadata["recipe_id"].astype(str).tolist() == ["10", "20", "30"]
 
 
+def test_load_warns_for_tiny_embedding_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeRecipeEncoder:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        def load(self) -> None:
+            return None
+
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            return np.zeros((len(texts), 4), dtype=float)
+
+    metadata = pd.DataFrame(
+        {
+            "recipe_id": [str(i) for i in range(10)],
+            "name": [f"recipe-{i}" for i in range(10)],
+            "description": ["d"] * 10,
+            "ingredients": ["i"] * 10,
+            "steps": ["s"] * 10,
+            "minutes": [20] * 10,
+            "n_steps": [3] * 10,
+            "n_ingredients": [6] * 10,
+            "vegan": [0, 1] * 5,
+        }
+    )
+    embeddings = np.random.default_rng(42).normal(size=(10, 4)).astype(np.float32)
+    recipe_ids = pd.Series([str(i) for i in range(10)], name="recipe_id")
+
+    monkeypatch.setattr("recipe_discovery.retrieval.service.RecipeEncoder", FakeRecipeEncoder)
+    monkeypatch.setattr("recipe_discovery.retrieval.service.load_processed_recipes", lambda _: metadata)
+    monkeypatch.setattr("recipe_discovery.retrieval.service.load_embeddings", lambda _: embeddings)
+    monkeypatch.setattr("recipe_discovery.retrieval.service.load_recipe_ids", lambda _: recipe_ids)
+
+    service = RetrievalService()
+
+    with caplog.at_level(logging.WARNING):
+        service.load(
+            processed_path=tmp_path / "metadata.csv",
+            embeddings_path=tmp_path / "embeddings.npy",
+            recipe_ids_path=tmp_path / "ids.csv",
+        )
+
+    assert any("tiny subset" in record.getMessage() for record in caplog.records)
+
+
 def test_metadata_alignment_uses_recipe_id_not_accidental_row_order() -> None:
     service = RetrievalService()
     metadata = pd.DataFrame(
@@ -212,6 +265,62 @@ def test_text_query_returns_ranked_results(toy_service: RetrievalService) -> Non
     assert len(result) == 3
     assert "similarity_score" in result.columns
     assert result["similarity_score"].is_monotonic_decreasing
+
+
+def test_exact_tag_query_prioritizes_korean_matches(toy_service: RetrievalService) -> None:
+    result = toy_service.search(RetrievalRequest(query="korean", top_k=5))
+
+    assert not result.empty
+    assert "query_tag_match" in result.columns
+    assert "matched_query_tag" in result.columns
+    assert result.iloc[0]["korean"] == 1
+    assert result["query_tag_match"].is_monotonic_decreasing
+
+
+def test_near_exact_tag_query_with_suffix_prioritizes_matches(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="korean recipes", top_k=5))
+
+    assert not result.empty
+    assert "query_tag_match" in result.columns
+    assert result.iloc[0]["korean"] == 1
+
+
+def test_exact_tag_query_prioritizes_vegan_matches(toy_service: RetrievalService) -> None:
+    result = toy_service.search(RetrievalRequest(query="vegan", top_k=5))
+
+    assert not result.empty
+    assert "query_tag_match" in result.columns
+    assert (result.head(2)["vegan"] == 1).all()
+
+
+def test_exact_tag_query_prioritizes_desserts_matches(toy_service: RetrievalService) -> None:
+    result = toy_service.search(RetrievalRequest(query="desserts", top_k=5))
+
+    assert not result.empty
+    assert "query_tag_match" in result.columns
+    assert result.iloc[0]["desserts"] == 1
+
+
+def test_free_text_non_exact_query_keeps_semantic_path(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="quick vegetarian dinner", top_k=5))
+
+    assert not result.empty
+    assert "similarity_score" in result.columns
+    assert "query_tag_match" not in result.columns
+
+
+def test_unknown_query_does_not_crash_and_falls_back(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="totally-unknown-cuisine", top_k=5))
+
+    assert not result.empty
+    assert "similarity_score" in result.columns
+    assert "query_tag_match" not in result.columns
 
 
 def test_dietary_filter_works_on_one_hot_columns(toy_service: RetrievalService) -> None:
