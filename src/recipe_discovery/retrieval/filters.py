@@ -83,8 +83,64 @@ def _apply_ingredient_filter(df: pd.DataFrame, max_ingredients: int) -> pd.DataF
 
     if max_ingredients <= 5 and "5-ingredients-or-less" in df.columns:
         return df.loc[df["5-ingredients-or-less"] == 1]
-
     return df
+
+def _apply_calories_filter(df: pd.DataFrame, max_calories: int) -> pd.DataFrame:
+    """Filter by total fat using numeric field."""
+    if "calories" in df.columns:
+        calories_values = pd.to_numeric(df["calories"], errors="coerce")
+        return df.loc[calories_values <= max_calories]
+    return df
+
+def _apply_fat_filter(df: pd.DataFrame, max_fat: int) -> pd.DataFrame:
+    """Filter by total fat using numeric field."""
+    if "total_fat" in df.columns:
+        fat_values = pd.to_numeric(df["total_fat"], errors="coerce")
+        return df.loc[fat_values <= max_fat]
+    return df
+
+def _apply_sugar_filter(df: pd.DataFrame, max_sugar: int) -> pd.DataFrame:
+    """Filter by total sugar using numeric field."""
+    if "sugar" in df.columns:
+        sugar_values = pd.to_numeric(df["sugar"], errors="coerce")
+        return df.loc[sugar_values <= max_sugar]
+    return df
+
+def _apply_sodium_filter(df: pd.DataFrame, max_sodium: int) -> pd.DataFrame:
+    """Filter by total sodium using numeric field."""
+    if "sodium" in df.columns:
+        sodium_values = pd.to_numeric(df["sodium"], errors="coerce")
+        return df.loc[sodium_values <= max_sodium]
+    return df
+
+def _apply_protein_filter(df: pd.DataFrame, max_protein: int) -> pd.DataFrame:
+    """Filter by total protein using numeric field."""
+    if "protein" in df.columns:
+        protein_values = pd.to_numeric(df["protein"], errors="coerce")
+        return df.loc[protein_values <= max_protein]
+    return df
+
+def _apply_saturated_fat_filter(df: pd.DataFrame, max_saturated_fat: int) -> pd.DataFrame:
+    """Filter by total saturated fat using numeric field."""
+    if "saturated_fat" in df.columns:
+        saturated_fat_values = pd.to_numeric(df["saturated_fat"], errors="coerce")
+        return df.loc[saturated_fat_values <= max_saturated_fat]
+    return df
+
+def _apply_carbohydrates_filter(df: pd.DataFrame, max_carbohydrates: int) -> pd.DataFrame:
+    """Filter by total carbohydrates using numeric field."""
+    if "carbohydrates" in df.columns:
+        carbohydrates_values = pd.to_numeric(df["carbohydrates"], errors="coerce")
+        return df.loc[carbohydrates_values <= max_carbohydrates]
+    return df
+
+def _apply_rating_filter(df: pd.DataFrame, min_rating: float) -> pd.DataFrame:
+    """Filter by average rating using numeric field."""
+    if "rating" in df.columns:
+        rating_values = pd.to_numeric(df["rating"], errors="coerce")
+        return df.loc[rating_values >= min_rating]
+    return df
+
 
 
 def apply_basic_filters(
@@ -92,6 +148,14 @@ def apply_basic_filters(
     dietary_filter: str | None = None,
     max_time_minutes: int | None = None,
     max_ingredients: int | None = None,
+    max_calories: int | None = None,
+    max_fat: int | None = None,
+    max_sugar: int | None = None,
+    max_sodium: int | None = None,
+    max_protein: int | None = None,
+    max_saturated_fat: int | None = None,
+    max_carbohydrates: int | None = None,
+    min_rating: float | None = None,
 ) -> pd.DataFrame:
     """Apply metadata and one-hot dietary filters to a candidate result table."""
     result = df.copy()
@@ -101,6 +165,30 @@ def apply_basic_filters(
 
     if max_ingredients is not None:
         result = _apply_ingredient_filter(result, max_ingredients)
+
+    if max_calories is not None:
+        result = _apply_calories_filter(result, max_calories)
+
+    if max_fat is not None:
+        result = _apply_fat_filter(result, max_fat)
+
+    if max_sugar is not None:
+        result = _apply_sugar_filter(result, max_sugar)
+
+    if max_sodium is not None:
+        result = _apply_sodium_filter(result, max_sodium)
+
+    if max_protein is not None:
+        result = _apply_protein_filter(result, max_protein)
+
+    if max_saturated_fat is not None:
+        result = _apply_saturated_fat_filter(result, max_saturated_fat)
+
+    if max_carbohydrates is not None:
+        result = _apply_carbohydrates_filter(result, max_carbohydrates)
+
+    if min_rating is not None:
+        result = _apply_rating_filter(result, min_rating)
 
     if dietary_filter and dietary_filter.lower() != "any":
         dietary_cols = _resolve_dietary_columns(result, dietary_filter)
