@@ -18,7 +18,7 @@ def render_basic_filters() -> dict[str, Any]:
     protein = st.slider("Max protein (g)", 0, 6552, 20)
     saturated_fat = st.slider("Max saturated fat (g)", 0, 10395, 10)
     carbonhydrates = st.slider("Max carbohydrates (g)", 0, 30698, 50)
-    total_ratings = st.slider("Average Rating", 0, 5, 4)
+    total_ratings = st.slider("Average Rating", 0, 5, 4, step = 0.1)
 
     return {
         "dietary": dietary,
