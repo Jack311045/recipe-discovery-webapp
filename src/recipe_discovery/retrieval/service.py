@@ -214,12 +214,13 @@ class RetrievalService:
         return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
 
 
-    def search(self, request: RetrievalRequest) -> pd.DataFrame:
-        """Return filtered top-k recipe matches for a query.
-
-        This v1 runtime path intentionally performs direct cosine scoring
-        against the loaded embedding matrix before candidate-pool filtering.
-        """
+    def _search_candidates(
+        self,
+        request: RetrievalRequest,
+        *,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return filtered candidate matches for a query."""
         if self.encoder is None or self.embeddings is None or self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
