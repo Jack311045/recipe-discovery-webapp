@@ -42,6 +42,14 @@ class RetrievalRequest:
     dietary_filter: str | None = None
     max_time_minutes: int | None = None
     max_ingredients: int | None = None
+    max_calories: int | None = None,
+    max_fat: int | None = None,
+    max_sugar: int | None = None,
+    max_sodium: int | None = None,
+    max_protein: int | None = None,
+    max_saturated_fat: int | None = None,
+    max_carbohydrates: int | None = None,
+    min_rating: float | None = None,
 
 
 class RetrievalService:
@@ -411,6 +419,14 @@ class RetrievalService:
             dietary_filter=request.dietary_filter,
             max_time_minutes=request.max_time_minutes,
             max_ingredients=request.max_ingredients,
+            calories = request.max_calories,
+            fat = request.max_fat,
+            sugar = request.max_sugar,
+            sodium = request.max_sodium,
+            protein = request.max_protein, 
+            saturated_fat = request.max_saturated_fat,
+            carbonhydrates = request.max_carbohydrates,
+            total_ratings = request.min_rating
         )
 
         if filtered.empty:
