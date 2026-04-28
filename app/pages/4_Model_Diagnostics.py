@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 import json
 
@@ -25,6 +27,10 @@ artifacts = {
     "Embeddings": ARTIFACTS_DIR / "recipe_embeddings.npy",
     "Recipe IDs": ARTIFACTS_DIR / "recipe_ids.csv",
     "Embedding metadata": ARTIFACTS_DIR / "embedding_metadata.json",
+    "SigLIP embeddings": ARTIFACTS_DIR / "recipe_embeddings_siglip.npy",
+    "SigLIP recipe IDs": ARTIFACTS_DIR / "recipe_ids_siglip.csv",
+    "SigLIP metadata": ARTIFACTS_DIR / "embedding_metadata_siglip.json",
+    "Image map": ARTIFACTS_DIR / "image_map.parquet",
     "PCA projector": ARTIFACTS_DIR / "pca_projector.pkl",
     "PCA projections (2D)": ARTIFACTS_DIR / "pca_projection.npy",
     "Autoencoder projections (2D)": ARTIFACTS_DIR / "projections_2d.npy",

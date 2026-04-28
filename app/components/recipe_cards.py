@@ -226,6 +226,7 @@ def render_recipe_card(
 ) -> None:
     """Render a recipe result card with compact or detailed layouts."""
     title = str(recipe.get("name", recipe.get("title", "Untitled recipe")))
+    image_url = recipe.get("image_url")
     score = _as_float(recipe.get("similarity_score"))
     minutes = _as_int(recipe.get("minutes"))
     n_ingredients = _as_int(recipe.get("n_ingredients"))
@@ -235,6 +236,10 @@ def render_recipe_card(
     compact = str(display_mode).strip().lower() == "compact"
 
     with st.container(border=True):
+        image_text = str(image_url).strip() if image_url is not None else ""
+        if image_text and image_text.lower() not in {"none", "null", "nan"}:
+            st.image(str(image_url), use_container_width=True)
+
         header = f"**{rank}. {title}**" if rank is not None else f"**{title}**"
         cols = st.columns([4, 1])
         with cols[0]:

@@ -45,20 +45,27 @@ def scatter_2d_with_highlights(
     x_label: str = "PC1",
     y_label: str = "PC2",
     title: str = "Recipe Embedding Map",
+    background_hover: bool = False,
 ) -> go.Figure:
     """Scatter plot with all recipes as grey background + search results highlighted in orange."""
     fig = go.Figure()
 
     # Background: all recipes (grey)
+    background_text = None
+    background_hovertemplate = None
+    if background_hover and hover_name in background_df.columns:
+        background_text = background_df[hover_name]
+        background_hovertemplate = "%{text}<extra></extra>"
+
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=background_df[x],
             y=background_df[y],
             mode="markers",
             name="All recipes",
-            text=background_df[hover_name] if hover_name in background_df.columns else None,
-            hovertemplate="%{text}<extra></extra>",
-            marker=dict(color="lightgrey", size=5, opacity=0.5),
+            text=background_text,
+            hovertemplate=background_hovertemplate,
+            marker=dict(color="lightgrey", size=4, opacity=0.4),
         )
     )
 
