@@ -13,8 +13,6 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from recipe_discovery.reduction.autoencoder import AutoencoderReducer
 from recipe_discovery.reduction.config import AutoencoderConfig
-from recipe_discovery.reduction.autoencoder import AutoencoderReducer
-from recipe_discovery.reduction.config import AutoencoderConfig
 from recipe_discovery.reduction.utils import normalize_embeddings, get_checkpoint_hash
 
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +52,7 @@ def train_autoencoder(args: argparse.Namespace) -> None:
     )
     
     config = AutoencoderConfig(
+        input_dim=int(embeddings.shape[1]),
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.lr,
@@ -89,6 +88,7 @@ def train_autoencoder(args: argparse.Namespace) -> None:
     else:
         logger.info("Starting training on %s", device)
         best_val_loss = float("inf")
+        epochs_no_improve = 0
         
         for epoch in range(config.epochs):
             model.train()
@@ -132,6 +132,15 @@ def train_autoencoder(args: argparse.Namespace) -> None:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 reducer.save_checkpoint(weights_path)
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if args.early_stop_patience and epochs_no_improve >= args.early_stop_patience:
+                    logger.info(
+                        "Early stopping after %d epochs without improvement.",
+                        epochs_no_improve,
+                    )
+                    break
                 
         logger.info("Training complete. Best val loss: %.6f", best_val_loss)
         reducer.load_checkpoint(weights_path)
@@ -153,6 +162,12 @@ def main() -> None:
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--denoise", action="store_true", help="Enable denoising mode")
     parser.add_argument("--noise_std", type=float, default=0.05)
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=5,
+        help="Stop if validation loss does not improve for N epochs (0 disables).",
+    )
     
     args = parser.parse_args()
     train_autoencoder(args)
