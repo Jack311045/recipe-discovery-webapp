@@ -45,6 +45,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="HuggingFace model identifier.",
     )
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of recipes to encode for fast testing.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing artifacts.")
     return parser.parse_args(argv)
 
@@ -63,6 +64,10 @@ def main(argv: list[str] | None = None) -> None:
     # 1. Load processed CSV
     logger.info("=== Step 1: Loading processed recipes ===")
     df = load_processed_recipes(args.input_path)
+    
+    if args.limit:
+        logger.info("Limiting to %d recipes for testing.", args.limit)
+        df = df.head(args.limit)
 
     # 2. Build canonical recipe texts
     logger.info("=== Step 2: Building recipe corpus ===")

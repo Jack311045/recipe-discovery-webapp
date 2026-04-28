@@ -182,13 +182,53 @@ class RetrievalService:
             self.embeddings.shape[0],
         )
 
+        # Attach 2D projections if available
+        projections_path = ARTIFACTS_DIR / "projections_2d.npy"
+        pca_projections_path = ARTIFACTS_DIR / "pca_projection.npy"
+        
+        proj_file = projections_path if projections_path.exists() else pca_projections_path
+        if proj_file.exists():
+            try:
+                proj_array = np.load(proj_file)
+                if len(proj_array) == len(self.metadata):
+                    self.metadata["x_proj"] = proj_array[:, 0]
+                    self.metadata["y_proj"] = proj_array[:, 1]
+                    logger.info("Loaded 2D projections from %s", proj_file)
+                else:
+                    logger.warning("Projection shape mismatch. Skipping 2D coords.")
+            except Exception as e:
+                logger.error("Failed to load projections: %s", e)
+        else:
+            logger.warning("No 2D projections found in artifacts.")
+
+    def get_all_projections(self) -> pd.DataFrame:
+        """Return all available 2D projections for the background scatter plot.
+        
+        Returns a DataFrame with ['recipe_id', 'x_proj', 'y_proj'].
+        Returns an empty DataFrame if projections are not loaded.
+        """
+        if self.metadata is None or "x_proj" not in self.metadata.columns:
+            return pd.DataFrame(columns=[ID_COLUMN, "x_proj", "y_proj"])
+            
+        # Return only the rows that actually have projection coordinates
+        has_proj = self.metadata["x_proj"].notna()
+        cols = [ID_COLUMN, "x_proj", "y_proj"]
+        
+        # We also might want to return title or other metadata for tooltips, but the spec
+        # specifically requested the background points. Adding title to be safe for UI.
+        if "name" in self.metadata.columns:
+            cols.append("name")
+            
+        return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
+
+
     def _search_candidates(
         self,
         request: RetrievalRequest,
         *,
         limit_to_top_k: bool,
     ) -> pd.DataFrame:
-        """Return similarity-ranked filtered candidates for a query."""
+        """Return filtered candidate matches for a query."""
         if self.encoder is None or self.embeddings is None or self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
