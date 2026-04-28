@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 
 from recipe_discovery.data.load import load_processed_recipes
 from recipe_discovery.data.schema import get_one_hot_tag_columns
@@ -293,6 +294,39 @@ def test_candidate_pool_then_filtering_finds_result_beyond_top_k() -> None:
 
     assert len(result) == 1
     assert result.iloc[0]["recipe_id"] == "3"
+
+
+def test_combined_search_uses_text_to_refine_image_candidates() -> None:
+    service = RetrievalService()
+    visually_relevant_count = 50
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": [str(i) for i in range(visually_relevant_count + 1)],
+            "name": [f"visual match {i}" for i in range(visually_relevant_count)]
+            + ["generic rice dish"],
+            "minutes": [20] * (visually_relevant_count + 1),
+            "n_ingredients": [5] * (visually_relevant_count + 1),
+        }
+    )
+    service._siglip_embeddings = np.vstack(
+        [
+            np.tile(np.array([[0.9, 0.1]], dtype=float), (visually_relevant_count, 1)),
+            np.array([[0.2, 0.98]], dtype=float),
+        ]
+    )
+    service._encode_image = lambda image: np.array([1.0, 0.0], dtype=float)  # type: ignore[method-assign]
+    service._encode_siglip_text = lambda text: np.array([0.0, 1.0], dtype=float)  # type: ignore[method-assign]
+
+    result = service.search_combined(
+        "served with rice",
+        Image.new("RGB", (1, 1)),
+        RetrievalRequest(query="served with rice", top_k=1),
+        alpha=0.1,
+    )
+
+    assert result.iloc[0]["name"] != "generic rice dish"
+    assert "image_similarity_score" in result.columns
+    assert "text_similarity_score" in result.columns
 
 
 def test_search_with_optional_rerank_falls_back_to_similarity_only(

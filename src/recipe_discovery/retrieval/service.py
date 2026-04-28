@@ -23,7 +23,10 @@ from recipe_discovery.retrieval.filters import apply_basic_filters
 from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
 from recipe_discovery.settings import ARTIFACTS_DIR, DATA_PROCESSED_DIR
+
 SIGLIP_MODEL_ID = "google/siglip-base-patch16-224"
+SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT = 0.75
+SIGLIP_COMBINED_CANDIDATE_MULTIPLIER = 50
 FALLBACK_IMAGE_URL = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c"
 
 
@@ -164,7 +167,9 @@ class RetrievalService:
         ids = self._normalize_recipe_ids(recipe_ids)
         if ids.duplicated().any():
             duplicate_count = int(ids.duplicated().sum())
-            raise ValueError(f"recipe_ids artifact has {duplicate_count} duplicate recipe_id values.")
+            raise ValueError(
+                f"recipe_ids artifact has {duplicate_count} duplicate recipe_id values."
+            )
 
         meta_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
         id_to_row = pd.Series(np.arange(len(ids), dtype=int), index=ids)
@@ -297,6 +302,61 @@ class RetrievalService:
             features = outputs.pooler_output
             features = features / features.norm(p=2, dim=-1, keepdim=True)
         return features.cpu().numpy()[0]
+
+    def _encode_siglip_text(self, text: str) -> np.ndarray:
+        self._load_siglip_model()
+        if self._siglip_model is None or self._siglip_processor is None:
+            raise RuntimeError("SigLIP model failed to load.")
+
+        with torch.no_grad():
+            inputs = self._siglip_processor(
+                text=[text],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            outputs = self._siglip_model.get_text_features(**inputs)
+            features = outputs.pooler_output
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
+        return features.cpu().numpy()[0]
+
+    def encode_combined(
+        self,
+        text: str,
+        image: Image.Image,
+        *,
+        alpha: float = SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT,
+    ) -> np.ndarray:
+        """Return a combined SigLIP vector for text + image inputs."""
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0.0 and 1.0")
+
+        self._load_siglip_model()
+        if self._siglip_model is None or self._siglip_processor is None:
+            raise RuntimeError("SigLIP model failed to load.")
+
+        with torch.no_grad():
+            img_inputs = self._siglip_processor(
+                images=image.convert("RGB"),
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            img_out = self._siglip_model.get_image_features(**img_inputs)
+            img_vec = img_out.pooler_output
+            img_vec = img_vec / img_vec.norm(p=2, dim=-1, keepdim=True)
+
+            txt_inputs = self._siglip_processor(
+                text=[text],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            txt_out = self._siglip_model.get_text_features(**txt_inputs)
+            txt_vec = txt_out.pooler_output
+            txt_vec = txt_vec / txt_vec.norm(p=2, dim=-1, keepdim=True)
+
+        combined = alpha * img_vec + (1.0 - alpha) * txt_vec
+        combined = combined / combined.norm(p=2, dim=-1, keepdim=True)
+        return combined.cpu().numpy()[0]
 
     def get_all_projections(self) -> pd.DataFrame:
         """Return all available 2D projections for the background scatter plot.
@@ -478,3 +538,61 @@ class RetrievalService:
             embeddings=self._siglip_embeddings,
             limit_to_top_k=True,
         )
+
+    def search_combined(
+        self,
+        text: str,
+        image: Image.Image,
+        request: RetrievalRequest,
+        *,
+        alpha: float = SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT,
+    ) -> pd.DataFrame:
+        """Return filtered top-k matches for combined text + image input."""
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if not text.strip():
+            raise ValueError("Text query is required for combined search.")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0.0 and 1.0")
+
+        self._load_siglip_embeddings()
+        if self._siglip_embeddings is None:
+            raise RuntimeError("SigLIP embeddings failed to load.")
+
+        image_vec = self._encode_image(image)
+        text_vec = self._encode_siglip_text(text)
+        image_scores = cosine_similarity(query=image_vec, matrix=self._siglip_embeddings)
+        text_scores = cosine_similarity(query=text_vec, matrix=self._siglip_embeddings)
+        combined_scores = alpha * image_scores + (1.0 - alpha) * text_scores
+
+        candidate_pool = min(
+            len(image_scores),
+            max(request.top_k * SIGLIP_COMBINED_CANDIDATE_MULTIPLIER, request.top_k),
+        )
+        if request.top_k <= 0 or candidate_pool == 0:
+            return self.metadata.iloc[0:0].assign(
+                similarity_score=pd.Series(dtype=float),
+                image_similarity_score=pd.Series(dtype=float),
+                text_similarity_score=pd.Series(dtype=float),
+            )
+
+        # Combined queries should treat text as a refinement on visually relevant dishes.
+        image_top_idx = np.argpartition(-image_scores, candidate_pool - 1)[:candidate_pool]
+        ranked_idx = image_top_idx[np.argsort(-combined_scores[image_top_idx])]
+
+        candidates = self.metadata.iloc[ranked_idx].copy()
+        candidates["similarity_score"] = combined_scores[ranked_idx]
+        candidates["image_similarity_score"] = image_scores[ranked_idx]
+        candidates["text_similarity_score"] = text_scores[ranked_idx]
+        filtered = apply_basic_filters(
+            candidates,
+            dietary_filter=request.dietary_filter,
+            max_time_minutes=request.max_time_minutes,
+            max_ingredients=request.max_ingredients,
+        )
+
+        if filtered.empty:
+            return filtered
+
+        ranked = filtered.sort_values("similarity_score", ascending=False)
+        return ranked.head(request.top_k).reset_index(drop=True)
