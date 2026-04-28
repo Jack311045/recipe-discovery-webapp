@@ -11,6 +11,7 @@ transformers>=4.38
 Pillow>=10.0
 requests>=2.31
 scikit-learn>=1.5
+gdown>=5.2
 pytest>=8.2
 black>=24.4
 ruff>=0.5
