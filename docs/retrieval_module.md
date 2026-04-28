@@ -92,9 +92,18 @@ Search algorithm:
 3. Select a candidate pool larger than top_k (currently max(top_k * 10, top_k)).
 4. Rank candidates by similarity descending.
 5. Apply metadata filters.
-6. Re-sort filtered rows by similarity_score and return final top_k.
+6. If the query exactly or near-exactly matches a known one-hot tag column (for example vegan, korean, desserts), apply an additive tag-match boost and sort by boosted score.
+7. Otherwise, sort by similarity_score only.
+8. Return final top_k rows.
 
 This avoids the common failure mode where filtering is applied only after truncating to top_k too early.
+
+Tag-aware ranking rules:
+
+1. Matching is generalized from processed schema columns and is not hardcoded to any cuisine list.
+2. Near-exact matching supports normalized forms such as punctuation variants, singular/plural variants, and common suffixes like "recipes".
+3. Similarity remains part of the ranking score; the boost is additive and only applied when a confident tag-column match is found.
+4. Unknown/free-text queries continue through similarity-first ranking with no tag-match requirement.
 
 ## Optional Regression Reranking Path
 
@@ -146,6 +155,19 @@ Validation is intentionally split between fast deterministic tests and real-runt
 2. Medium-scale real-runtime smoke: scripts/smoke_medium_pipeline.py (100-500 rows, real sentence-transformers runtime)
 
 The deterministic tests keep CI fast and stable, while the medium smoke script validates realistic integration behavior before release milestones.
+
+## Artifact Coverage Diagnostics
+
+Implementation location:
+
+1. src/recipe_discovery/retrieval/service.py
+
+On load, RetrievalService warns when embedding artifacts are tiny (currently fewer than 5000 rows).
+
+Why this matters:
+
+1. Tiny subsets can appear to "fail" short intent queries simply because relevant recipes are absent.
+2. This warning is an early signal to rebuild artifacts without --limit before relevance debugging.
 
 ## MVP Completion Level
 
