@@ -47,6 +47,25 @@ else:
         )
         x_label, y_label = "PC1 (fallback)", "PC2 (fallback)"
 
+# Performance controls
+max_points = st.slider(
+    "Background points",
+    min_value=1000,
+    max_value=min(100000, max(len(all_proj), 1000)),
+    value=min(20000, len(all_proj)),
+    step=1000,
+    help="Reduce points to speed up rendering.",
+)
+show_background_hover = st.checkbox(
+    "Show hover labels for background points",
+    value=False,
+    help="Disabling hover improves rendering speed for large point clouds.",
+)
+
+if len(all_proj) > max_points:
+    # Sampling keeps interactions snappy while preserving the overall shape.
+    all_proj = all_proj.sample(n=max_points, random_state=42).reset_index(drop=True)
+
 # Optional: search query to highlight results
 with st.expander("🔍 Highlight search results on the map", expanded=False):
     highlight_query = st.text_input("Enter a query to highlight matching recipes", key="map_search")
@@ -73,6 +92,7 @@ fig = scatter_2d_with_highlights(
     x_label=x_label,
     y_label=y_label,
     title=f"Recipe Embedding Map ({projection_method})",
+    background_hover=show_background_hover,
 )
 st.plotly_chart(fig, use_container_width=True)
 

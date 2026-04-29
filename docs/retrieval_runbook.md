@@ -39,7 +39,8 @@ Expected behavior:
 
 1. Service loads successfully.
 2. Query results include similarity_score.
-3. Results are sorted descending by similarity.
+3. Exact/near-exact one-hot tag queries (for example vegan, korean, desserts) prioritize matching-tag rows.
+4. Non-tag free-text queries remain similarity-first.
 
 ## Run Medium-Scale Real-Runtime Smoke
 
@@ -100,6 +101,25 @@ Dietary notes:
 1. Input is matched against one-hot tag column names (not a tags text field).
 2. Multi-value input like "vegetarian, gluten-free" is supported.
 
+UI default note:
+
+1. Search page max-time and max-ingredient constraints are optional and disabled by default.
+2. Enabling those filters narrows candidate results as expected.
+
+## Short Intent Tag-Aware Ranking
+
+After similarity ranking and filtering, retrieval optionally applies an additive boost when query text resolves to a known one-hot tag column.
+
+Resolution behavior:
+
+1. Uses detected one-hot tag columns from processed schema.
+2. Supports exact and near-exact normalized forms (for example punctuation, singular/plural, "korean recipes").
+3. Falls back safely to pure similarity ranking for unknown queries.
+
+Operational expectation:
+
+1. A short intent query like "vegan" or "desserts" should move matching rows earlier in the top results when such rows exist in artifacts.
+
 ## Direct Cosine vs Saved Index
 
 Live RetrievalService search currently uses direct cosine scoring on the embedding matrix.
@@ -158,3 +178,7 @@ Fix: relax dietary_filter, max_time_minutes, or max_ingredients, or increase top
 6. Encoder load failure
 Cause: sentence-transformers not installed or model download/network issue.
 Fix: install requirements and retry in an environment with model download access.
+
+7. Weak relevance for obvious short intent queries despite code changes
+Cause: embeddings were built from a tiny subset (for example from --limit), so relevant recipes are missing.
+Fix: rebuild embeddings without --limit and rerun smoke checks.

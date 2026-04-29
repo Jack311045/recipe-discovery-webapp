@@ -4,43 +4,57 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
+import torch
+from PIL import Image
+from transformers import AutoModel, AutoProcessor
 
 from recipe_discovery.data.load import load_processed_recipes
-from recipe_discovery.data.schema import ID_COLUMN
+from recipe_discovery.data.schema import ID_COLUMN, get_one_hot_tag_columns
 from recipe_discovery.embeddings.encoder import EmbeddingConfig, RecipeEncoder
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.filters import apply_basic_filters
+from recipe_discovery.retrieval.image_fetcher import attach_foodcom_images
 from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
-from recipe_discovery.settings import ARTIFACTS_DIR
+from recipe_discovery.settings import ARTIFACTS_DIR, DATA_PROCESSED_DIR
+
+SIGLIP_MODEL_ID = "google/siglip-base-patch16-224"
+SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT = 0.75
+SIGLIP_COMBINED_CANDIDATE_MULTIPLIER = 50
+FALLBACK_IMAGE_URL = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c"
+
 
 logger = logging.getLogger(__name__)
+
+_SMALL_ARTIFACT_WARN_THRESHOLD = 5000
+_EXACT_TAG_SCORE_BOOST = 1.0
 
 
 @dataclass
 class RetrievalRequest:
     """Search request payload."""
 
-    query: str
+    query: str | None = None
     top_k: int = 10
     dietary_filter: str | None = None
     max_time_minutes: int | None = None
     max_ingredients: int | None = None
-    max_calories: int | None = None,
-    max_fat: int | None = None,
-    max_sugar: int | None = None,
-    max_sodium: int | None = None,
-    max_protein: int | None = None,
-    max_saturated_fat: int | None = None,
-    max_carbohydrates: int | None = None,
-    min_rating: float | None = None,
+    max_calories: int | None = None
+    max_fat: int | None = None
+    max_sugar: int | None = None
+    max_sodium: int | None = None
+    max_protein: int | None = None
+    max_saturated_fat: int | None = None
+    max_carbohydrates: int | None = None
+    min_rating: float | None = None
 
 
 class RetrievalService:
@@ -55,6 +69,11 @@ class RetrievalService:
         self.encoder = None
         self.embeddings: np.ndarray | None = None
         self.metadata: pd.DataFrame | None = None
+        self.one_hot_tag_columns: list[str] = []
+        self._siglip_embeddings: np.ndarray | None = None
+        self._siglip_processor: AutoProcessor | None = None
+        self._siglip_model: AutoModel | None = None
+        self._siglip_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     @staticmethod
     def _normalize_recipe_ids(values: pd.Series) -> pd.Series:
@@ -62,6 +81,46 @@ class RetrievalService:
         text = values.astype(str).str.strip()
         # CSV parsing can represent integer IDs as float-like strings (for example "58.0").
         return text.str.replace(r"\.0+$", "", regex=True)
+
+    @staticmethod
+    def _normalize_token(value: str) -> str:
+        """Normalize label/query text for robust one-hot tag matching."""
+        return re.sub(r"[^a-z0-9]+", "-", value.lower().strip()).strip("-")
+
+    def _resolve_query_tag_column(self, query: str, df: pd.DataFrame) -> str | None:
+        """Resolve exact/near-exact query intent to a known one-hot tag column."""
+        normalized_query = self._normalize_token(query)
+        if not normalized_query:
+            return None
+
+        tag_columns = self.one_hot_tag_columns or get_one_hot_tag_columns(df)
+        if not tag_columns:
+            return None
+
+        normalized_to_col = {
+            self._normalize_token(col): col for col in tag_columns
+        }
+
+        if normalized_query in normalized_to_col:
+            return normalized_to_col[normalized_query]
+
+        # Near-exact tolerance for singular/plural and common query suffixes.
+        candidates = {normalized_query}
+        if normalized_query.endswith("s") and len(normalized_query) > 1:
+            candidates.add(normalized_query[:-1])
+        else:
+            candidates.add(f"{normalized_query}s")
+
+        for suffix in ("-recipe", "-recipes", "-food", "-foods", "-dish", "-dishes"):
+            if normalized_query.endswith(suffix):
+                trimmed = normalized_query[: -len(suffix)]
+                if trimmed:
+                    candidates.add(trimmed)
+
+        for candidate in candidates:
+            if candidate in normalized_to_col:
+                return normalized_to_col[candidate]
+        return None
 
     def _get_encoder_config(self) -> EmbeddingConfig:
         """Build encoder config, preferring saved embedding metadata when present."""
@@ -147,6 +206,69 @@ class RetrievalService:
         )
         return aligned
 
+    def _align_embeddings_to_metadata(
+        self,
+        embeddings: np.ndarray,
+        recipe_ids: pd.Series,
+    ) -> np.ndarray:
+        """Reorder embeddings so their rows match ``self.metadata`` order."""
+        if self.metadata is None:
+            raise RuntimeError("Metadata must be loaded before aligning embeddings.")
+
+        if embeddings.ndim != 2:
+            raise ValueError(f"Expected 2D embeddings array, got shape {embeddings.shape}.")
+
+        ids = self._normalize_recipe_ids(recipe_ids)
+        if ids.duplicated().any():
+            duplicate_count = int(ids.duplicated().sum())
+            raise ValueError(
+                f"recipe_ids artifact has {duplicate_count} duplicate recipe_id values."
+            )
+
+        meta_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
+        id_to_row = pd.Series(np.arange(len(ids), dtype=int), index=ids)
+        missing = meta_ids[~meta_ids.isin(id_to_row.index)]
+        if not missing.empty:
+            sample = ", ".join(missing.head(5).tolist())
+            raise ValueError(
+                "Some metadata recipe_ids were not found in SigLIP artifacts. "
+                f"Missing examples: {sample}"
+            )
+
+        row_idx = id_to_row.loc[meta_ids].to_numpy()
+        return embeddings[row_idx]
+
+    def _load_image_map(self, path: Path) -> pd.Series:
+        if not path.exists():
+            logger.info("Image map not found at %s; using fallback images.", path)
+            return pd.Series(dtype=str)
+
+        image_df = pd.read_parquet(path)
+        if "recipe_id" not in image_df.columns or "image_url" not in image_df.columns:
+            raise ValueError("image_map.parquet must include recipe_id and image_url columns.")
+
+        image_df = image_df[["recipe_id", "image_url"]].copy()
+        image_df["recipe_id"] = self._normalize_recipe_ids(image_df["recipe_id"])
+        image_df = image_df.drop_duplicates(subset=["recipe_id"], keep="first")
+        return image_df.set_index("recipe_id")["image_url"]
+
+    def _attach_image_urls(self) -> None:
+        if self.metadata is None:
+            return
+
+        image_map_path = DATA_PROCESSED_DIR / "image_map.parquet"
+        image_map = self._load_image_map(image_map_path)
+        if image_map.empty:
+            self.metadata["image_url"] = FALLBACK_IMAGE_URL
+            return
+
+        meta_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
+        self.metadata["image_url"] = meta_ids.map(image_map).fillna(FALLBACK_IMAGE_URL)
+
+    def _attach_foodcom_images(self, results: pd.DataFrame) -> pd.DataFrame:
+        """Patch missing images in a result frame via Food.com lookup."""
+        return attach_foodcom_images(results, fallback_image=FALLBACK_IMAGE_URL)
+
     def load(
         self,
         *,
@@ -171,6 +293,8 @@ class RetrievalService:
 
         self.metadata = self._align_metadata_by_recipe_id(metadata, recipe_ids, embeddings)
         self.embeddings = embeddings
+        self.one_hot_tag_columns = get_one_hot_tag_columns(self.metadata)
+        self._attach_image_urls()
 
         encoder_config = self._get_encoder_config()
         self.encoder = RecipeEncoder(config=encoder_config)
@@ -181,6 +305,17 @@ class RetrievalService:
             len(self.metadata),
             self.embeddings.shape[0],
         )
+        logger.info(
+            "Detected %d one-hot tag columns for retrieval intent matching.",
+            len(self.one_hot_tag_columns),
+        )
+
+        if self.embeddings.shape[0] < _SMALL_ARTIFACT_WARN_THRESHOLD:
+            logger.warning(
+                "Embedding artifact is a tiny subset (%d rows). Search quality for broad "
+                "queries may be poor. Rebuild embeddings without --limit for full coverage.",
+                self.embeddings.shape[0],
+            )
 
         # Attach 2D projections if available
         projections_path = ARTIFACTS_DIR / "projections_2d.npy"
@@ -201,6 +336,98 @@ class RetrievalService:
         else:
             logger.warning("No 2D projections found in artifacts.")
 
+    def _load_siglip_embeddings(self) -> None:
+        if self._siglip_embeddings is not None:
+            return
+
+        emb_path = ARTIFACTS_DIR / "recipe_embeddings_siglip.npy"
+        ids_path = ARTIFACTS_DIR / "recipe_ids_siglip.csv"
+        if not emb_path.exists() or not ids_path.exists():
+            raise FileNotFoundError(
+                "SigLIP artifacts not found. Run scripts/generate_siglip_embeddings.py first."
+            )
+
+        siglip_embeddings = load_embeddings(emb_path)
+        siglip_ids = load_recipe_ids(ids_path)
+        self._siglip_embeddings = self._align_embeddings_to_metadata(siglip_embeddings, siglip_ids)
+
+    def _load_siglip_model(self) -> None:
+        if self._siglip_model is not None and self._siglip_processor is not None:
+            return
+
+        self._siglip_processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_ID)
+        self._siglip_model = AutoModel.from_pretrained(SIGLIP_MODEL_ID).to(self._siglip_device)
+        self._siglip_model.eval()
+
+    def _encode_image(self, image: Image.Image) -> np.ndarray:
+        self._load_siglip_model()
+        if self._siglip_model is None or self._siglip_processor is None:
+            raise RuntimeError("SigLIP model failed to load.")
+
+        with torch.no_grad():
+            inputs = self._siglip_processor(images=image.convert("RGB"), return_tensors="pt").to(
+                self._siglip_device
+            )
+            outputs = self._siglip_model.get_image_features(**inputs)
+            features = outputs.pooler_output
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
+        return features.cpu().numpy()[0]
+
+    def _encode_siglip_text(self, text: str) -> np.ndarray:
+        self._load_siglip_model()
+        if self._siglip_model is None or self._siglip_processor is None:
+            raise RuntimeError("SigLIP model failed to load.")
+
+        with torch.no_grad():
+            inputs = self._siglip_processor(
+                text=[text],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            outputs = self._siglip_model.get_text_features(**inputs)
+            features = outputs.pooler_output
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
+        return features.cpu().numpy()[0]
+
+    def encode_combined(
+        self,
+        text: str,
+        image: Image.Image,
+        *,
+        alpha: float = SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT,
+    ) -> np.ndarray:
+        """Return a combined SigLIP vector for text + image inputs."""
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0.0 and 1.0")
+
+        self._load_siglip_model()
+        if self._siglip_model is None or self._siglip_processor is None:
+            raise RuntimeError("SigLIP model failed to load.")
+
+        with torch.no_grad():
+            img_inputs = self._siglip_processor(
+                images=image.convert("RGB"),
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            img_out = self._siglip_model.get_image_features(**img_inputs)
+            img_vec = img_out.pooler_output
+            img_vec = img_vec / img_vec.norm(p=2, dim=-1, keepdim=True)
+
+            txt_inputs = self._siglip_processor(
+                text=[text],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            ).to(self._siglip_device)
+            txt_out = self._siglip_model.get_text_features(**txt_inputs)
+            txt_vec = txt_out.pooler_output
+            txt_vec = txt_vec / txt_vec.norm(p=2, dim=-1, keepdim=True)
+
+        combined = alpha * img_vec + (1.0 - alpha) * txt_vec
+        combined = combined / combined.norm(p=2, dim=-1, keepdim=True)
+        return combined.cpu().numpy()[0]
+
     def get_all_projections(self) -> pd.DataFrame:
         """Return all available 2D projections for the background scatter plot.
         
@@ -220,24 +447,22 @@ class RetrievalService:
             cols.append("name")
             
         return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
-
-
-    def _search_candidates(
+    def _search_candidates_for_vector(
         self,
         request: RetrievalRequest,
         *,
+        query_vec: np.ndarray,
+        embeddings: np.ndarray,
         limit_to_top_k: bool,
     ) -> pd.DataFrame:
-        """Return filtered candidate matches for a query."""
-        if self.encoder is None or self.embeddings is None or self.metadata is None:
+        """Return filtered candidate matches for a query vector."""
+        if self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
         if request.top_k <= 0:
             return self.metadata.iloc[0:0].assign(similarity_score=pd.Series(dtype=float))
 
-        encoded = self.encoder.encode([request.query], show_progress=False)
-        query_vec = np.asarray(encoded)[0]
-        scores = cosine_similarity(query=query_vec, matrix=self.embeddings)
+        scores = cosine_similarity(query=query_vec, matrix=embeddings)
 
         candidate_pool = min(len(scores), max(request.top_k * 10, request.top_k))
         if candidate_pool == 0:
@@ -254,24 +479,68 @@ class RetrievalService:
             dietary_filter=request.dietary_filter,
             max_time_minutes=request.max_time_minutes,
             max_ingredients=request.max_ingredients,
-            calories = request.max_calories,
-            fat = request.max_fat,
-            sugar = request.max_sugar,
-            sodium = request.max_sodium,
-            protein = request.max_protein, 
-            saturated_fat = request.max_saturated_fat,
-            carbonhydrates = request.max_carbohydrates,
-            total_ratings = request.min_rating
+            max_calories=request.max_calories,
+            max_fat=request.max_fat,
+            max_sugar=request.max_sugar,
+            max_sodium=request.max_sodium,
+            max_protein=request.max_protein,
+            max_saturated_fat=request.max_saturated_fat,
+            max_carbohydrates=request.max_carbohydrates,
+            min_rating=request.min_rating,
         )
 
         if filtered.empty:
             return filtered
 
-        ranked = filtered.sort_values("similarity_score", ascending=False)
+        query_text = request.query or ""
+        matched_tag_col = self._resolve_query_tag_column(query_text, filtered)
+        if matched_tag_col and matched_tag_col in filtered.columns:
+            ranked = filtered.copy()
+            ranked["query_tag_match"] = (
+                pd.to_numeric(ranked[matched_tag_col], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .eq(1)
+                .astype(int)
+            )
+            ranked["matched_query_tag"] = matched_tag_col
+            ranked["boosted_similarity_score"] = (
+                ranked["similarity_score"]
+                + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
+            )
+            ranked = ranked.sort_values(
+                ["boosted_similarity_score", "similarity_score"],
+                ascending=False,
+            )
+        else:
+            ranked = filtered.sort_values("similarity_score", ascending=False)
+
         if limit_to_top_k:
             ranked = ranked.head(request.top_k)
 
         return ranked.reset_index(drop=True)
+
+    def _search_candidates(
+        self,
+        request: RetrievalRequest,
+        *,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return filtered candidate matches for a text query."""
+        if self.encoder is None or self.embeddings is None or self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+
+        if not request.query or not request.query.strip():
+            raise ValueError("Search query is required for text search.")
+
+        encoded = self.encoder.encode([request.query], show_progress=False)
+        query_vec = np.asarray(encoded)[0]
+        return self._search_candidates_for_vector(
+            request,
+            query_vec=query_vec,
+            embeddings=self.embeddings,
+            limit_to_top_k=limit_to_top_k,
+        )
 
     @staticmethod
     def load_regression_model(
@@ -341,7 +610,8 @@ class RetrievalService:
             rating_weight=rating_weight,
             regression_model_path=regression_model_path,
         )
-        return reranked.head(request.top_k).reset_index(drop=True)
+        results = reranked.head(request.top_k).reset_index(drop=True)
+        return self._attach_foodcom_images(results)
 
     def search(self, request: RetrievalRequest) -> pd.DataFrame:
         """Return filtered top-k recipe matches for a query.
@@ -349,4 +619,82 @@ class RetrievalService:
         This v1 runtime path intentionally performs direct cosine scoring
         against the loaded embedding matrix before candidate-pool filtering.
         """
-        return self._search_candidates(request, limit_to_top_k=True)
+        results = self._search_candidates(request, limit_to_top_k=True)
+        return self._attach_foodcom_images(results)
+
+    def search_by_image(self, image: Image.Image, request: RetrievalRequest) -> pd.DataFrame:
+        """Return filtered top-k recipe matches for an uploaded image."""
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+
+        self._load_siglip_embeddings()
+        if self._siglip_embeddings is None:
+            raise RuntimeError("SigLIP embeddings failed to load.")
+
+        query_vec = self._encode_image(image)
+        results = self._search_candidates_for_vector(
+            request,
+            query_vec=query_vec,
+            embeddings=self._siglip_embeddings,
+            limit_to_top_k=True,
+        )
+        return self._attach_foodcom_images(results)
+
+    def search_combined(
+        self,
+        text: str,
+        image: Image.Image,
+        request: RetrievalRequest,
+        *,
+        alpha: float = SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT,
+    ) -> pd.DataFrame:
+        """Return filtered top-k matches for combined text + image input."""
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if not text.strip():
+            raise ValueError("Text query is required for combined search.")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be between 0.0 and 1.0")
+
+        self._load_siglip_embeddings()
+        if self._siglip_embeddings is None:
+            raise RuntimeError("SigLIP embeddings failed to load.")
+
+        image_vec = self._encode_image(image)
+        text_vec = self._encode_siglip_text(text)
+        image_scores = cosine_similarity(query=image_vec, matrix=self._siglip_embeddings)
+        text_scores = cosine_similarity(query=text_vec, matrix=self._siglip_embeddings)
+        combined_scores = alpha * image_scores + (1.0 - alpha) * text_scores
+
+        candidate_pool = min(
+            len(image_scores),
+            max(request.top_k * SIGLIP_COMBINED_CANDIDATE_MULTIPLIER, request.top_k),
+        )
+        if request.top_k <= 0 or candidate_pool == 0:
+            return self.metadata.iloc[0:0].assign(
+                similarity_score=pd.Series(dtype=float),
+                image_similarity_score=pd.Series(dtype=float),
+                text_similarity_score=pd.Series(dtype=float),
+            )
+
+        # Combined queries should treat text as a refinement on visually relevant dishes.
+        image_top_idx = np.argpartition(-image_scores, candidate_pool - 1)[:candidate_pool]
+        ranked_idx = image_top_idx[np.argsort(-combined_scores[image_top_idx])]
+
+        candidates = self.metadata.iloc[ranked_idx].copy()
+        candidates["similarity_score"] = combined_scores[ranked_idx]
+        candidates["image_similarity_score"] = image_scores[ranked_idx]
+        candidates["text_similarity_score"] = text_scores[ranked_idx]
+        filtered = apply_basic_filters(
+            candidates,
+            dietary_filter=request.dietary_filter,
+            max_time_minutes=request.max_time_minutes,
+            max_ingredients=request.max_ingredients,
+        )
+
+        if filtered.empty:
+            return filtered
+
+        ranked = filtered.sort_values("similarity_score", ascending=False)
+        results = ranked.head(request.top_k).reset_index(drop=True)
+        return self._attach_foodcom_images(results)
