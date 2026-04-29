@@ -246,6 +246,8 @@ def render_recipe_card(
     *,
     display_mode: str = "Detailed",
     on_add_to_shopping_list: Callable[[Mapping[str, object]], None] | None = None,
+    on_negative_feedback: Callable[[str], None] | None = None,
+    feedback_key: str | None = None,
     widget_key_prefix: str = "search",
 ) -> None:
     """Render a recipe result card with compact or detailed layouts."""
@@ -291,8 +293,18 @@ def render_recipe_card(
         st.markdown("<div class='menu-card-divider'></div>", unsafe_allow_html=True)
 
         food_url = _build_food_com_url(recipe)
-        if food_url or on_add_to_shopping_list is not None:
-            num_actions = int(bool(food_url)) + int(on_add_to_shopping_list is not None)
+        recipe_id = recipe.get("recipe_id") or recipe.get("id")
+        show_feedback = (
+            on_negative_feedback is not None
+            and feedback_key is not None
+            and recipe_id is not None
+        )
+        if food_url or on_add_to_shopping_list is not None or show_feedback:
+            num_actions = (
+                int(bool(food_url))
+                + int(on_add_to_shopping_list is not None)
+                + int(show_feedback)
+            )
             action_cols = st.columns(num_actions)
             col_idx = 0
             if food_url:
@@ -309,6 +321,17 @@ def render_recipe_card(
                     )
                     if add_clicked:
                         on_add_to_shopping_list(recipe)
+                col_idx += 1
+            if show_feedback:
+                with action_cols[col_idx]:
+                    if st.button(
+                        "Not relevant",
+                        key=feedback_key,
+                        use_container_width=True,
+                        help="Remove this result and adjust recommendations.",
+                    ):
+                        on_negative_feedback(str(recipe_id))
+                        st.rerun()
 
         if compact:
             _render_overview(

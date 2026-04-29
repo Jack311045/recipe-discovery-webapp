@@ -5,15 +5,24 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
-import torch
 from PIL import Image
-from transformers import AutoModel, AutoProcessor
+
+try:  # Optional at import time; required only for SigLIP image search.
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - depends on local environment
+    torch = None
+
+try:  # Optional at import time; required only for SigLIP image search.
+    from transformers import AutoModel, AutoProcessor
+except ModuleNotFoundError:  # pragma: no cover - depends on local environment
+    AutoModel = None
+    AutoProcessor = None
 
 from recipe_discovery.data.load import load_processed_recipes
 from recipe_discovery.data.schema import ID_COLUMN, get_one_hot_tag_columns
@@ -73,7 +82,11 @@ class RetrievalService:
         self._siglip_embeddings: np.ndarray | None = None
         self._siglip_processor: AutoProcessor | None = None
         self._siglip_model: AutoModel | None = None
-        self._siglip_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._siglip_device = (
+            "cuda"
+            if torch is not None and torch.cuda.is_available()
+            else "cpu"
+        )
 
     @staticmethod
     def _normalize_recipe_ids(values: pd.Series) -> pd.Series:
@@ -354,6 +367,11 @@ class RetrievalService:
     def _load_siglip_model(self) -> None:
         if self._siglip_model is not None and self._siglip_processor is not None:
             return
+        if torch is None or AutoModel is None or AutoProcessor is None:
+            raise RuntimeError(
+                "Image search requires torch and transformers. "
+                "Install project requirements before using SigLIP search."
+            )
 
         self._siglip_processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_ID)
         self._siglip_model = AutoModel.from_pretrained(SIGLIP_MODEL_ID).to(self._siglip_device)
@@ -560,6 +578,84 @@ class RetrievalService:
             embeddings=self.embeddings,
             limit_to_top_k=limit_to_top_k,
         )
+
+    def encode_text_query(self, query: str) -> np.ndarray:
+        """Encode a text query into the loaded SBERT embedding space."""
+        if self.encoder is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if not query or not query.strip():
+            raise ValueError("Search query is required for text feedback.")
+
+        encoded = self.encoder.encode([query], show_progress=False)
+        vec = np.asarray(encoded, dtype=float)[0]
+        norm = np.linalg.norm(vec)
+        if norm == 0:
+            return vec
+        return vec / norm
+
+    def search_with_negative_feedback(
+        self,
+        request: RetrievalRequest,
+        *,
+        query_vec: np.ndarray,
+        negative_recipe_ids: set[str],
+        alpha: float = 0.3,
+        embedding_space: str = "text",
+    ) -> pd.DataFrame:
+        """Run text retrieval after applying negative Rocchio feedback."""
+        if self.metadata is None or self.embeddings is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if embedding_space != "text":
+            raise ValueError("Only text feedback is supported in the MVP.")
+
+        excluded = {
+            str(recipe_id).strip()
+            for recipe_id in negative_recipe_ids
+            if str(recipe_id).strip()
+        }
+        if not excluded:
+            return self.search(request)
+
+        metadata_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
+        excluded_series = pd.Series(list(excluded), dtype=str)
+        excluded = set(self._normalize_recipe_ids(excluded_series).tolist())
+
+        negative_mask = metadata_ids.isin(excluded).to_numpy()
+        if not negative_mask.any():
+            return self.search(request)
+
+        query_vec = np.asarray(query_vec, dtype=float)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm > 0:
+            query_vec = query_vec / query_norm
+
+        negative_vectors = self.embeddings[negative_mask]
+        mean_negative = negative_vectors.mean(axis=0)
+        adjusted = query_vec - alpha * mean_negative
+        adjusted_norm = np.linalg.norm(adjusted)
+        if adjusted_norm > 0:
+            adjusted = adjusted / adjusted_norm
+        else:
+            adjusted = query_vec
+
+        original_top_k = request.top_k
+        feedback_request = replace(
+            request,
+            top_k=max(original_top_k + len(excluded) + 10, original_top_k),
+        )
+        candidates = self._search_candidates_for_vector(
+            feedback_request,
+            query_vec=adjusted,
+            embeddings=self.embeddings,
+            limit_to_top_k=False,
+        )
+
+        if not candidates.empty:
+            candidate_ids = self._normalize_recipe_ids(candidates[ID_COLUMN])
+            candidates = candidates.loc[~candidate_ids.isin(excluded)].copy()
+
+        results = candidates.head(original_top_k).reset_index(drop=True)
+        return self._attach_foodcom_images(results)
 
     @staticmethod
     def load_regression_model(

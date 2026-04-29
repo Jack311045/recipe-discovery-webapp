@@ -686,6 +686,100 @@ def test_direct_cosine_and_saved_index_paths_are_consistent(tmp_path: Path) -> N
     assert neighbor_idx[0].tolist() == cosine_ranked.tolist()
 
 
+@pytest.fixture
+def feedback_service() -> RetrievalService:
+    """Create a tiny loaded service for relevance-feedback tests."""
+
+    class DummyEncoder:
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            return np.array([[1.0, 0.0] for _ in texts], dtype=float)
+
+    service = RetrievalService()
+    service.encoder = DummyEncoder()
+    service.embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.95, 0.05],
+            [0.0, 1.0],
+            [0.1, 0.9],
+        ],
+        dtype=float,
+    )
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2", "3", "4"],
+            "name": ["A", "B", "C", "D"],
+            "minutes": [10, 20, 30, 40],
+            "n_ingredients": [3, 4, 5, 6],
+        }
+    )
+    service.one_hot_tag_columns = []
+    service._attach_foodcom_images = lambda df: df
+    return service
+
+
+def test_encode_text_query_returns_normalized_vector(
+    feedback_service: RetrievalService,
+) -> None:
+    vec = feedback_service.encode_text_query("quick dinner")
+
+    assert vec.shape == (2,)
+    assert np.isclose(np.linalg.norm(vec), 1.0)
+
+
+def test_encode_text_query_requires_loaded_encoder() -> None:
+    service = RetrievalService()
+
+    with pytest.raises(RuntimeError, match="not loaded"):
+        service.encode_text_query("quick dinner")
+
+
+def test_feedback_excludes_negative_ids(feedback_service: RetrievalService) -> None:
+    request = RetrievalRequest(query="quick dinner", top_k=2)
+    query_vec = feedback_service.encode_text_query("quick dinner")
+
+    results = feedback_service.search_with_negative_feedback(
+        request,
+        query_vec=query_vec,
+        negative_recipe_ids={"1"},
+    )
+
+    assert "1" not in results["recipe_id"].astype(str).tolist()
+    assert len(results) <= 2
+
+
+def test_feedback_rejects_non_text_embedding_space(
+    feedback_service: RetrievalService,
+) -> None:
+    request = RetrievalRequest(query="quick dinner", top_k=2)
+    query_vec = feedback_service.encode_text_query("quick dinner")
+
+    with pytest.raises(ValueError, match="Only text feedback"):
+        feedback_service.search_with_negative_feedback(
+            request,
+            query_vec=query_vec,
+            negative_recipe_ids={"1"},
+            embedding_space="siglip",
+        )
+
+
+def test_feedback_with_unknown_ids_falls_back_to_search(
+    feedback_service: RetrievalService,
+) -> None:
+    request = RetrievalRequest(query="quick dinner", top_k=2)
+    query_vec = feedback_service.encode_text_query("quick dinner")
+
+    feedback_results = feedback_service.search_with_negative_feedback(
+        request,
+        query_vec=query_vec,
+        negative_recipe_ids={"999"},
+    )
+    normal_results = feedback_service.search(request)
+
+    assert feedback_results["recipe_id"].tolist() == normal_results["recipe_id"].tolist()
+
+
 def test_cosine_similarity_shape() -> None:
     query = np.array([1.0, 0.0])
     matrix = np.array([[1.0, 0.0], [0.0, 1.0]])

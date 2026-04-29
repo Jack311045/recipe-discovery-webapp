@@ -62,12 +62,22 @@ def _initialize_session_state() -> None:
         "landing_results_df": None,
         "landing_query": "",
         "history_search_requested": False,
+        "feedback_query_vec": None,
+        "feedback_excluded_ids": set(),
+        "feedback_active_request": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
     ensure_shopping_list_state()
+
+
+def _reset_feedback() -> None:
+    """Clear relevance-feedback state for a new search context."""
+    st.session_state["feedback_query_vec"] = None
+    st.session_state["feedback_excluded_ids"] = set()
+    st.session_state["feedback_active_request"] = None
 
 
 def _add_to_history(query: str) -> None:
@@ -231,6 +241,30 @@ def _add_recipe_to_shopping_list(recipe: dict[str, object]) -> None:
         st.success(message)
 
 
+def _on_negative_feedback(recipe_id: str) -> None:
+    """Apply negative feedback to the active text-search results."""
+    excluded = st.session_state["feedback_excluded_ids"]
+    excluded.add(str(recipe_id))
+
+    current = st.session_state.get("search_results_df")
+    query_vec = st.session_state.get("feedback_query_vec")
+    request = st.session_state.get("feedback_active_request")
+    if query_vec is None or request is None:
+        if isinstance(current, pd.DataFrame) and "recipe_id" in current.columns:
+            keep = current["recipe_id"].astype(str) != str(recipe_id)
+            st.session_state["search_results_df"] = current.loc[keep].reset_index(drop=True)
+        return
+
+    svc = get_retrieval_service()
+    results = svc.search_with_negative_feedback(
+        request,
+        query_vec=query_vec,
+        negative_recipe_ids=excluded,
+        alpha=0.3,
+    )
+    st.session_state["search_results_df"] = results.copy()
+
+
 st.set_page_config(page_title="Search Recipes", layout="wide")
 apply_restaurant_menu_theme()
 
@@ -365,6 +399,7 @@ run_search = search_clicked or history_search_requested
 
 if run_search:
     svc = get_retrieval_service()
+    _reset_feedback()
     request = RetrievalRequest(
         query=query,
         top_k=top_k,
@@ -391,6 +426,8 @@ if run_search:
         results = svc.search_by_image(image, request)
         search_mode = "image"
     elif has_query:
+        st.session_state["feedback_query_vec"] = svc.encode_text_query(query)
+        st.session_state["feedback_active_request"] = request
         results = svc.search(request)
         search_mode = "text"
     else:
@@ -460,6 +497,10 @@ if isinstance(results_df, pd.DataFrame):
 
         display_df = sort_results_for_display(results_df, sort_mode)
         tag_columns = infer_tag_columns(display_df)
+        show_feedback = (
+            search_mode == "text"
+            and st.session_state.get("feedback_query_vec") is not None
+        )
 
         has_proj = "x_proj" in display_df.columns
         if has_proj:
@@ -475,11 +516,14 @@ if isinstance(results_df, pd.DataFrame):
                 tag_columns,
                 max_tags=max_tags,
             )
+            recipe_id = str(row_dict.get("recipe_id") or row_dict.get("id") or rank)
             render_recipe_card(
                 row_dict,
                 rank=rank,
                 display_mode=display_mode,
                 on_add_to_shopping_list=_add_recipe_to_shopping_list,
+                on_negative_feedback=_on_negative_feedback if show_feedback else None,
+                feedback_key=f"feedback_{recipe_id}_{rank}" if show_feedback else None,
                 widget_key_prefix=f"results_{search_mode or 'text'}",
             )
 else:
