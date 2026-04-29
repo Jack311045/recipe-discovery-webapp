@@ -75,7 +75,6 @@ def main() -> int:
         output=args.out,
         quiet=False,
         use_cookies=args.allow_cookies,
-        remaining_ok=True,
     )
     return 0
 

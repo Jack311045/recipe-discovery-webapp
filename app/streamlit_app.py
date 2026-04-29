@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.components.theme import apply_restaurant_menu_theme
 from recipe_discovery.settings import get_app_title
 
 
 def main() -> None:
     st.set_page_config(page_title=get_app_title(), layout="wide")
+    apply_restaurant_menu_theme()
+
+    st.markdown("<p class='menu-script-accent'>Chef's Selection</p>", unsafe_allow_html=True)
     st.title(get_app_title())
-    st.write(
+    st.markdown(
         "Semantic recipe retrieval, clustering, ranking, and 2D visualization."
     )
 

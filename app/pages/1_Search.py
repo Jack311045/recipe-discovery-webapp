@@ -22,7 +22,13 @@ from app.components.search_ui import (
     infer_tag_columns,
     sort_results_for_display,
 )
-from app.components.recipe_cards import render_recipe_card
+from app.components.recipe_cards import parse_ingredients, render_recipe_card
+from app.components.shopping_list import (
+    add_ingredients_to_shopping_list,
+    ensure_shopping_list_state,
+    get_shopping_list_count,
+)
+from app.components.theme import apply_restaurant_menu_theme
 from app.service_loader import get_retrieval_service
 from recipe_discovery.retrieval.service import RetrievalRequest
 
@@ -60,6 +66,8 @@ def _initialize_session_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    ensure_shopping_list_state()
 
 
 def _add_to_history(query: str) -> None:
@@ -186,44 +194,74 @@ def _render_landing_state() -> None:
     for rank, (_, row) in enumerate(landing_df.iterrows(), start=1):
         row_dict = row.to_dict()
         row_dict["_active_tags"] = get_active_tags(row_dict, tag_columns, max_tags=8)
-        render_recipe_card(row_dict, rank=rank, display_mode="Compact")
+        render_recipe_card(
+            row_dict,
+            rank=rank,
+            display_mode="Compact",
+            on_add_to_shopping_list=_add_recipe_to_shopping_list,
+            widget_key_prefix="landing",
+        )
+
+
+def _add_recipe_to_shopping_list(recipe: dict[str, object]) -> None:
+    """Merge recipe ingredients into shopping-list session state."""
+    ingredients = parse_ingredients(recipe.get("ingredients"))
+    if not ingredients:
+        st.info("This recipe has no ingredient list to add.")
+        return
+
+    source_recipe = str(recipe.get("name") or recipe.get("recipe_id") or "Recipe")
+    added_count, merged_count = add_ingredients_to_shopping_list(
+        ingredients,
+        source_recipe=source_recipe,
+    )
+    if added_count == 0 and merged_count == 0:
+        st.info("No valid ingredient lines were found for this recipe.")
+        return
+
+    total_count = get_shopping_list_count()
+    message = (
+        f"Shopping list updated: +{added_count} new"
+        f"{', merged ' + str(merged_count) if merged_count else ''}. "
+        f"Total items: {total_count}."
+    )
+    if hasattr(st, "toast"):
+        st.toast(message)
+    else:
+        st.success(message)
 
 
 st.set_page_config(page_title="Search Recipes", layout="wide")
+apply_restaurant_menu_theme()
 
 _initialize_session_state()
 
 st.markdown(
     """
     <style>
-    .search-hero {
-        padding: 1rem 1.1rem;
-        border-radius: 0.8rem;
-        background: linear-gradient(120deg, #f6fbff 0%, #eef7f2 100%);
-        border: 1px solid #d9e8dc;
-        margin-bottom: 0.4rem;
-    }
     .result-skeleton {
         display: grid;
         grid-template-columns: 260px 1fr;
         gap: 1rem;
         padding: 1rem;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
+        border: 1px solid #c8b38a;
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(255, 250, 241, 0.95) 0%, rgba(251, 241, 223, 0.95) 100%);
+        box-shadow: 0 6px 18px rgba(85, 58, 38, 0.1);
         margin-bottom: 0.8rem;
     }
     .sk-img,
     .sk-line {
-        background: #e5e7eb;
+        background: #e8d9bb;
         animation: pulse 1.2s ease-in-out infinite;
     }
     .sk-img {
         height: 150px;
-        border-radius: 8px;
+        border-radius: 10px;
     }
     .sk-line {
         height: 14px;
-        border-radius: 6px;
+        border-radius: 999px;
         margin-bottom: 0.75rem;
     }
     .sk-title { width: 70%; height: 22px; }
@@ -245,8 +283,9 @@ st.markdown(
 st.markdown(
     """
     <div class="search-hero">
-      <h2 style="margin:0;">🔍 Search Recipes</h2>
-      <p style="margin:0.35rem 0 0 0;">Search by text or upload a dish photo, then explore polished recipe cards and frontend-only display controls.</p>
+            <p class="search-kicker">Today's Menu</p>
+            <h2>Search Recipes</h2>
+            <p>Search by text or upload a dish photo, then explore polished recipe cards and frontend-only display controls.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -299,6 +338,9 @@ with st.sidebar:
         step=0.05,
         help="Higher keeps the uploaded dish as the anchor. Lower lets the text steer more.",
     )
+    st.markdown("---")
+    st.caption(f"Shopping list items: {get_shopping_list_count()}")
+    st.caption("Open the Shopping List page to review, check off, or edit items.")
 
 col_text, col_upload = st.columns([2, 1])
 
@@ -437,6 +479,8 @@ if isinstance(results_df, pd.DataFrame):
                 row_dict,
                 rank=rank,
                 display_mode=display_mode,
+                on_add_to_shopping_list=_add_recipe_to_shopping_list,
+                widget_key_prefix=f"results_{search_mode or 'text'}",
             )
 else:
     _render_landing_state()
