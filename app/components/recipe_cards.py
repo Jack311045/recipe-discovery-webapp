@@ -7,11 +7,15 @@ import html
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 import streamlit as st
 
-from recipe_discovery.retrieval.image_fetcher import build_food_com_url
+try:
+    from recipe_discovery.retrieval.image_fetcher import build_food_com_url as _build_food_com_url_impl
+except ModuleNotFoundError:  # pragma: no cover - optional dependency fallback
+    def _build_food_com_url_impl(recipe_id: object, recipe_name: str | None = None) -> str | None:
+        return None
 
 
 def _normalize_text_items(values: Iterable[object]) -> list[str]:
@@ -111,9 +115,9 @@ def _render_tag_chips(tags: list[str]) -> None:
         return
 
     chips = "".join(
-        f"<span style='display:inline-block;padding:0.2rem 0.55rem;"
+        f"<span style='display:inline-block;padding:0.18rem 0.55rem;"
         f"margin:0.15rem 0.3rem 0.15rem 0;border-radius:999px;"
-        f"background:#eef2ff;color:#2c3e7b;font-size:0.75rem;'>"
+        f"background:#f4e8d1;color:#5a4738;border:1px solid #c8b38a;font-size:0.75rem;'>"
         f"{html.escape(_readable_tag(tag))}</span>"
         for tag in tags
     )
@@ -225,7 +229,15 @@ def _build_food_com_url(recipe: Mapping[str, object]) -> str | None:
     if recipe_id is None:
         return None
     name = recipe.get("name")
-    return build_food_com_url(recipe_id, str(name) if name is not None else None)
+    return _build_food_com_url_impl(recipe_id, str(name) if name is not None else None)
+
+
+def _build_recipe_widget_suffix(recipe: Mapping[str, object], rank: int | None) -> str:
+    """Build a stable, widget-safe suffix for per-recipe action keys."""
+    raw = recipe.get("recipe_id") or recipe.get("id") or recipe.get("name") or "recipe"
+    clean = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw)).strip("_")
+    rank_part = str(rank) if rank is not None else "na"
+    return f"{clean or 'recipe'}_{rank_part}"
 
 
 def render_recipe_card(
@@ -233,9 +245,12 @@ def render_recipe_card(
     rank: int | None = None,
     *,
     display_mode: str = "Detailed",
+    on_add_to_shopping_list: Callable[[Mapping[str, object]], None] | None = None,
+    widget_key_prefix: str = "search",
 ) -> None:
     """Render a recipe result card with compact or detailed layouts."""
     title = str(recipe.get("name", recipe.get("title", "Untitled recipe")))
+    heading_text = f"{rank}. {title}" if rank is not None else title
     image_url = recipe.get("image_url")
     score = _as_float(recipe.get("similarity_score"))
     minutes = _as_int(recipe.get("minutes"))
@@ -250,10 +265,12 @@ def render_recipe_card(
         if image_text and image_text.lower() not in {"none", "null", "nan"}:
             st.image(str(image_url), width=260)
 
-        header = f"**{rank}. {title}**" if rank is not None else f"**{title}**"
         cols = st.columns([4, 1])
         with cols[0]:
-            st.markdown(header)
+            st.markdown(
+                f"<h3 class='menu-card-title'>{html.escape(heading_text)}</h3>",
+                unsafe_allow_html=True,
+            )
         with cols[1]:
             if score is not None:
                 st.metric("Match", f"{score:.2%}")
@@ -266,11 +283,31 @@ def render_recipe_card(
         if n_steps is not None:
             meta_parts.append(f"\U0001f4cb {int(n_steps)} steps")
         if meta_parts:
-            st.caption("  \u00b7  ".join(meta_parts))
+            st.markdown(
+                f"<p class='menu-card-meta'>{html.escape('  \u00b7  '.join(meta_parts))}</p>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<div class='menu-card-divider'></div>", unsafe_allow_html=True)
 
         food_url = _build_food_com_url(recipe)
-        if food_url:
-            st.link_button("Open on Food.com", food_url)
+        if food_url or on_add_to_shopping_list is not None:
+            num_actions = int(bool(food_url)) + int(on_add_to_shopping_list is not None)
+            action_cols = st.columns(num_actions)
+            col_idx = 0
+            if food_url:
+                with action_cols[col_idx]:
+                    st.link_button("Open on Food.com", food_url)
+                col_idx += 1
+            if on_add_to_shopping_list is not None:
+                with action_cols[col_idx]:
+                    suffix = _build_recipe_widget_suffix(recipe, rank)
+                    add_clicked = st.button(
+                        "Add to shopping list",
+                        key=f"{widget_key_prefix}_add_to_list_{suffix}",
+                        use_container_width=True,
+                    )
+                    if add_clicked:
+                        on_add_to_shopping_list(recipe)
 
         if compact:
             _render_overview(
