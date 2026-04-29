@@ -749,19 +749,37 @@ def test_feedback_excludes_negative_ids(feedback_service: RetrievalService) -> N
     assert len(results) <= 2
 
 
-def test_feedback_rejects_non_text_embedding_space(
+def test_feedback_rejects_unknown_embedding_space(
     feedback_service: RetrievalService,
 ) -> None:
     request = RetrievalRequest(query="quick dinner", top_k=2)
     query_vec = feedback_service.encode_text_query("quick dinner")
 
-    with pytest.raises(ValueError, match="Only text feedback"):
+    with pytest.raises(ValueError, match="embedding_space"):
         feedback_service.search_with_negative_feedback(
             request,
             query_vec=query_vec,
             negative_recipe_ids={"1"},
-            embedding_space="siglip",
+            embedding_space="unknown",
         )
+
+
+def test_feedback_supports_siglip_embedding_space(
+    feedback_service: RetrievalService,
+) -> None:
+    feedback_service._siglip_embeddings = feedback_service.embeddings.copy()
+    request = RetrievalRequest(query=None, top_k=2)
+    query_vec = np.array([1.0, 0.0], dtype=float)
+
+    results = feedback_service.search_with_negative_feedback(
+        request,
+        query_vec=query_vec,
+        negative_recipe_ids={"1"},
+        embedding_space="siglip",
+    )
+
+    assert "1" not in results["recipe_id"].astype(str).tolist()
+    assert len(results) <= 2
 
 
 def test_feedback_with_unknown_ids_falls_back_to_search(

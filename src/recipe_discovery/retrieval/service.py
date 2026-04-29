@@ -373,8 +373,15 @@ class RetrievalService:
                 "Install project requirements before using SigLIP search."
             )
 
-        self._siglip_processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_ID)
-        self._siglip_model = AutoModel.from_pretrained(SIGLIP_MODEL_ID).to(self._siglip_device)
+        try:
+            self._siglip_processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_ID)
+            self._siglip_model = AutoModel.from_pretrained(SIGLIP_MODEL_ID).to(self._siglip_device)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Image search requires the full SigLIP dependency stack, including "
+                "sentencepiece. Install project requirements and sentencepiece before "
+                "using image search."
+            ) from exc
         self._siglip_model.eval()
 
     def _encode_image(self, image: Image.Image) -> np.ndarray:
@@ -593,6 +600,22 @@ class RetrievalService:
             return vec
         return vec / norm
 
+    def encode_image_query(self, image: Image.Image) -> np.ndarray:
+        """Encode an uploaded image into the loaded SigLIP embedding space."""
+        self._load_siglip_embeddings()
+        return self._encode_image(image)
+
+    def encode_combined_query(
+        self,
+        text: str,
+        image: Image.Image,
+        *,
+        alpha: float = SIGLIP_COMBINED_DEFAULT_IMAGE_WEIGHT,
+    ) -> np.ndarray:
+        """Encode text + image into the loaded SigLIP embedding space."""
+        self._load_siglip_embeddings()
+        return self.encode_combined(text, image, alpha=alpha)
+
     def search_with_negative_feedback(
         self,
         request: RetrievalRequest,
@@ -602,11 +625,21 @@ class RetrievalService:
         alpha: float = 0.3,
         embedding_space: str = "text",
     ) -> pd.DataFrame:
-        """Run text retrieval after applying negative Rocchio feedback."""
-        if self.metadata is None or self.embeddings is None:
+        """Run retrieval after applying negative Rocchio feedback."""
+        if self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
-        if embedding_space != "text":
-            raise ValueError("Only text feedback is supported in the MVP.")
+
+        if embedding_space == "text":
+            if self.embeddings is None:
+                raise RuntimeError("RetrievalService is not loaded.")
+            embeddings = self.embeddings
+        elif embedding_space == "siglip":
+            self._load_siglip_embeddings()
+            if self._siglip_embeddings is None:
+                raise RuntimeError("SigLIP embeddings failed to load.")
+            embeddings = self._siglip_embeddings
+        else:
+            raise ValueError("embedding_space must be 'text' or 'siglip'.")
 
         excluded = {
             str(recipe_id).strip()
@@ -614,7 +647,13 @@ class RetrievalService:
             if str(recipe_id).strip()
         }
         if not excluded:
-            return self.search(request)
+            results = self._search_candidates_for_vector(
+                request,
+                query_vec=np.asarray(query_vec, dtype=float),
+                embeddings=embeddings,
+                limit_to_top_k=True,
+            )
+            return self._attach_foodcom_images(results)
 
         metadata_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
         excluded_series = pd.Series(list(excluded), dtype=str)
@@ -622,14 +661,20 @@ class RetrievalService:
 
         negative_mask = metadata_ids.isin(excluded).to_numpy()
         if not negative_mask.any():
-            return self.search(request)
+            results = self._search_candidates_for_vector(
+                request,
+                query_vec=np.asarray(query_vec, dtype=float),
+                embeddings=embeddings,
+                limit_to_top_k=True,
+            )
+            return self._attach_foodcom_images(results)
 
         query_vec = np.asarray(query_vec, dtype=float)
         query_norm = np.linalg.norm(query_vec)
         if query_norm > 0:
             query_vec = query_vec / query_norm
 
-        negative_vectors = self.embeddings[negative_mask]
+        negative_vectors = embeddings[negative_mask]
         mean_negative = negative_vectors.mean(axis=0)
         adjusted = query_vec - alpha * mean_negative
         adjusted_norm = np.linalg.norm(adjusted)
@@ -646,7 +691,7 @@ class RetrievalService:
         candidates = self._search_candidates_for_vector(
             feedback_request,
             query_vec=adjusted,
-            embeddings=self.embeddings,
+            embeddings=embeddings,
             limit_to_top_k=False,
         )
 

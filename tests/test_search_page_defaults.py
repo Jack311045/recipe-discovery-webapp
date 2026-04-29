@@ -29,7 +29,8 @@ def test_search_page_includes_display_controls() -> None:
     assert "Highest rating" in helper
     assert "Fastest" in helper
     assert "Fewest ingredients" in helper
-    assert "Card view" in source
+    assert "Card view" not in source
+    assert "DISPLAY_MODES" not in helper
 
 
 def test_search_page_includes_summary_metrics_section() -> None:
@@ -39,3 +40,10 @@ def test_search_page_includes_summary_metrics_section() -> None:
     assert "Avg cook time" in source
     assert "Avg rating" in source
     assert "Avg calories" in source
+
+
+def test_recipe_cards_include_reviews_tab() -> None:
+    source = Path("app/components/recipe_cards.py").read_text(encoding="utf-8")
+
+    assert '"Reviews"' in source
+    assert "all_reviews" in source

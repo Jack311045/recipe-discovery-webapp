@@ -9,6 +9,7 @@ torch>=2.2
 torchvision>=0.17
 sentence-transformers>=3.0
 transformers>=4.38
+sentencepiece>=0.2
 Pillow>=10.0
 requests>=2.31
 beautifulsoup4>=4.12

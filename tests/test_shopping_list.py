@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from app.components.shopping_list import infer_item_category, merge_ingredients, normalize_ingredient_name
+from app.components.shopping_list import (
+    decode_shopping_list_items,
+    encode_shopping_list_items,
+    infer_item_category,
+    merge_ingredients,
+    normalize_ingredient_name,
+)
 
 
 def test_normalize_ingredient_name_cleans_spacing_and_punctuation() -> None:
@@ -46,3 +52,31 @@ def test_infer_item_category_classifies_known_terms() -> None:
     assert infer_item_category("olive oil") == "pantry"
     assert infer_item_category("spinach") == "produce"
     assert infer_item_category("mystery ingredient") == "other"
+
+
+def test_shopping_list_payload_round_trips_items() -> None:
+    items = {
+        "olive oil": {
+            "normalized_name": "olive oil",
+            "display_name": "Olive oil",
+            "checked": True,
+            "category": "pantry",
+            "source_recipes": ["Pasta Night"],
+        },
+        "fresh basil": {
+            "normalized_name": "fresh basil",
+            "display_name": "Fresh basil",
+            "checked": False,
+            "category": "produce",
+            "source_recipes": ["Pasta Night", "Caprese"],
+        },
+    }
+
+    payload = encode_shopping_list_items(items)
+    decoded = decode_shopping_list_items(payload)
+
+    assert decoded == items
+
+
+def test_decode_shopping_list_payload_rejects_invalid_input() -> None:
+    assert decode_shopping_list_items("not-a-valid-payload") == {}

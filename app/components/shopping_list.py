@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import streamlit as st
 
@@ -140,6 +143,111 @@ def infer_item_category(normalized_name: str) -> str:
         if any(keyword in normalized_name for keyword in keywords):
             return category
     return "other"
+
+
+def _clean_source_recipes(raw_sources: object) -> list[str]:
+    if not isinstance(raw_sources, list):
+        return []
+
+    cleaned: list[str] = []
+    for source in raw_sources:
+        source_text = _clean_display_name(source)
+        if source_text and source_text not in cleaned:
+            cleaned.append(source_text)
+    return cleaned
+
+
+def _sanitize_shopping_item(
+    raw_key: object,
+    raw_item: Mapping[str, object],
+) -> tuple[str, dict[str, object]] | None:
+    normalized_name = normalize_ingredient_name(
+        raw_item.get("normalized_name") or raw_key
+    )
+    if not normalized_name:
+        return None
+
+    display_name = _clean_display_name(raw_item.get("display_name") or normalized_name)
+    category = str(raw_item.get("category") or "").strip().lower()
+    if category not in {*_CATEGORY_KEYWORDS.keys(), "other"}:
+        category = infer_item_category(normalized_name)
+
+    return normalized_name, {
+        "normalized_name": normalized_name,
+        "display_name": display_name or normalized_name,
+        "checked": bool(raw_item.get("checked", False)),
+        "category": category,
+        "source_recipes": _clean_source_recipes(raw_item.get("source_recipes")),
+    }
+
+
+def encode_shopping_list_items(items: Mapping[str, Mapping[str, object]]) -> str:
+    """Encode shopping-list items into a URL-safe transfer payload."""
+    cleaned_items: dict[str, dict[str, object]] = {}
+    for raw_key, raw_item in items.items():
+        sanitized = _sanitize_shopping_item(raw_key, raw_item)
+        if sanitized is None:
+            continue
+        normalized_name, item = sanitized
+        cleaned_items[normalized_name] = item
+
+    if not cleaned_items:
+        return ""
+
+    payload = json.dumps(
+        {"items": cleaned_items},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_shopping_list_items(payload: str) -> dict[str, dict[str, object]]:
+    """Decode a URL-safe shopping-list transfer payload."""
+    payload = str(payload or "").strip()
+    if not payload:
+        return {}
+
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{payload}{padding}".encode("ascii"))
+        parsed = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    raw_items = parsed.get("items")
+    if not isinstance(raw_items, dict):
+        return {}
+
+    cleaned_items: dict[str, dict[str, object]] = {}
+    for raw_key, raw_item in raw_items.items():
+        if not isinstance(raw_item, dict):
+            continue
+        sanitized = _sanitize_shopping_item(raw_key, raw_item)
+        if sanitized is None:
+            continue
+        normalized_name, item = sanitized
+        cleaned_items[normalized_name] = item
+    return cleaned_items
+
+
+def export_shopping_list_payload() -> str:
+    """Return the current session shopping list as a URL-safe payload."""
+    ensure_shopping_list_state()
+    items: dict[str, dict[str, object]] = st.session_state[SHOPPING_LIST_STATE_KEY]
+    return encode_shopping_list_items(items)
+
+
+def restore_shopping_list_payload(payload: str) -> bool:
+    """Restore session shopping-list state from a URL-safe payload."""
+    decoded_items = decode_shopping_list_items(payload)
+    if not decoded_items:
+        return False
+    st.session_state[SHOPPING_LIST_STATE_KEY] = decoded_items
+    return True
 
 
 def merge_ingredients(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from app.components.recipe_cards import parse_ingredients, parse_steps
+from app.components.recipe_cards import parse_ingredients, parse_reviews, parse_steps
 
 
 def test_parse_ingredients_supports_python_list_literal() -> None:
@@ -43,3 +43,9 @@ def test_parse_ingredients_supports_preparsed_iterables() -> None:
 
 def test_parse_steps_handles_nan_float() -> None:
     assert parse_steps(math.nan) == []
+
+
+def test_parse_reviews_supports_serialized_review_list() -> None:
+    raw = "['Great weeknight dinner.', 'Would make again.']"
+
+    assert parse_reviews(raw) == ["Great weeknight dinner.", "Would make again."]
