@@ -11,3 +11,6 @@ test:
 
 run-app:
 	streamlit run app/streamlit_app.py
+
+fetch-artifacts:
+	python scripts/fetch_gdrive_artifacts.py
