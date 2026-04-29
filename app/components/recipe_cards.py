@@ -283,8 +283,9 @@ def render_recipe_card(
         if n_steps is not None:
             meta_parts.append(f"\U0001f4cb {int(n_steps)} steps")
         if meta_parts:
+            escaped_meta = html.escape("  \u00b7  ".join(meta_parts))
             st.markdown(
-                f"<p class='menu-card-meta'>{html.escape('  \u00b7  '.join(meta_parts))}</p>",
+                f"<p class='menu-card-meta'>{escaped_meta}</p>",
                 unsafe_allow_html=True,
             )
         st.markdown("<div class='menu-card-divider'></div>", unsafe_allow_html=True)
