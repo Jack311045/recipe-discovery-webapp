@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import streamlit as st
+import pandas as pd
 
 from app.service_loader import get_retrieval_service
 from app.components.plots import scatter_2d_with_highlights, scatter_2d
@@ -22,7 +23,7 @@ st.caption(
     "Run a search to highlight where matching recipes land."
 )
 
-projection_method = st.radio("Projection method", ["PCA", "Autoencoder"], horizontal=True)
+projection_method = "PCA"
 
 svc = get_retrieval_service()
 all_proj = svc.get_all_projections()
@@ -47,6 +48,11 @@ else:
         )
         x_label, y_label = "PC1 (fallback)", "PC2 (fallback)"
 
+color_by_cluster = False
+if "cluster" in all_proj.columns:
+    color_mode = st.radio("Color markers by", ["Default (grey)", "Cluster labels"], horizontal=True)
+    color_by_cluster = color_mode == "Cluster labels"
+
 # Performance controls
 max_points = st.slider(
     "Background points",
@@ -58,7 +64,7 @@ max_points = st.slider(
 )
 show_background_hover = st.checkbox(
     "Show hover labels for background points",
-    value=False,
+    value=True,
     help="Disabling hover improves rendering speed for large point clouds.",
 )
 
@@ -68,20 +74,27 @@ if len(all_proj) > max_points:
 
 # Optional: search query to highlight results
 with st.expander("🔍 Highlight search results on the map", expanded=False):
-    highlight_query = st.text_input("Enter a query to highlight matching recipes", key="map_search")
+    highlight_query = st.text_input("Enter a query to highlight matching recipes (overrides Search page)", key="map_search")
     top_k_map = st.slider("Number of results to highlight", 1, 20, 8, key="map_topk")
     do_highlight = st.button("Highlight", key="map_btn")
 
-highlight_df = __import__("pandas").DataFrame()
+highlight_df = pd.DataFrame()
 
 if do_highlight and highlight_query.strip():
     with st.spinner("Searching…"):
         results = svc.search(RetrievalRequest(query=highlight_query, top_k=top_k_map))
     if not results.empty and "x_proj" in results.columns:
-        highlight_df = results[["name", "x_proj", "y_proj"]].dropna()
+        highlight_df = results.dropna(subset=["x_proj", "y_proj"])
         st.success(f"Highlighting {len(highlight_df)} results for: *{highlight_query}*")
     else:
         st.info("No results with projection data found.")
+elif "search_results_df" in st.session_state and isinstance(st.session_state["search_results_df"], pd.DataFrame):
+    base_highlight_df = st.session_state["search_results_df"]
+    if not base_highlight_df.empty and "x_proj" in base_highlight_df.columns:
+        highlight_df = base_highlight_df.dropna(subset=["x_proj", "y_proj"])
+        last_query = st.session_state.get("last_query", "")
+        if last_query:
+            st.info(f"Showing highlighted results from your Search page query: *{last_query}*")
 
 fig = scatter_2d_with_highlights(
     background_df=all_proj,
@@ -93,13 +106,14 @@ fig = scatter_2d_with_highlights(
     y_label=y_label,
     title=f"Recipe Embedding Map ({projection_method})",
     background_hover=show_background_hover,
+    color="cluster" if color_by_cluster else None,
 )
 st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("ℹ️ What am I looking at?"):
     st.markdown(
         f"""
-        - Each **grey dot** is one of the {len(all_proj):,} loaded recipes, projected from a
+        - Each **blue point** is one of the {len(all_proj):,} loaded recipes, projected from a
           384-dimensional sentence-transformer embedding space down to 2D using **{projection_method}**.
         - **Orange stars** are your search results — you can see how semantically similar recipes
           cluster together in this 2D space.
