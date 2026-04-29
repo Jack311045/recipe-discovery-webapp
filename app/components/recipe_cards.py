@@ -11,6 +11,8 @@ from collections.abc import Iterable, Mapping
 
 import streamlit as st
 
+from recipe_discovery.retrieval.image_fetcher import build_food_com_url
+
 
 def _normalize_text_items(values: Iterable[object]) -> list[str]:
     """Normalize nested iterables into a flat list of readable strings."""
@@ -218,6 +220,14 @@ def _render_nutrition_section(recipe: Mapping[str, object]) -> None:
             st.metric(label, value)
 
 
+def _build_food_com_url(recipe: Mapping[str, object]) -> str | None:
+    recipe_id = recipe.get("recipe_id") or recipe.get("id")
+    if recipe_id is None:
+        return None
+    name = recipe.get("name")
+    return build_food_com_url(recipe_id, str(name) if name is not None else None)
+
+
 def render_recipe_card(
     recipe: Mapping[str, object],
     rank: int | None = None,
@@ -238,7 +248,7 @@ def render_recipe_card(
     with st.container(border=True):
         image_text = str(image_url).strip() if image_url is not None else ""
         if image_text and image_text.lower() not in {"none", "null", "nan"}:
-            st.image(str(image_url), use_container_width=True)
+            st.image(str(image_url), width=260)
 
         header = f"**{rank}. {title}**" if rank is not None else f"**{title}**"
         cols = st.columns([4, 1])
@@ -257,6 +267,10 @@ def render_recipe_card(
             meta_parts.append(f"\U0001f4cb {int(n_steps)} steps")
         if meta_parts:
             st.caption("  \u00b7  ".join(meta_parts))
+
+        food_url = _build_food_com_url(recipe)
+        if food_url:
+            st.link_button("Open on Food.com", food_url)
 
         if compact:
             _render_overview(
