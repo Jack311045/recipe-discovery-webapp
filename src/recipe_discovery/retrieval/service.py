@@ -431,7 +431,7 @@ class RetrievalService:
     def get_all_projections(self) -> pd.DataFrame:
         """Return all available 2D projections for the background scatter plot.
         
-        Returns a DataFrame with ['recipe_id', 'x_proj', 'y_proj'].
+        Returns a DataFrame with ['recipe_id', 'x_proj', 'y_proj'] and metadata.
         Returns an empty DataFrame if projections are not loaded.
         """
         if self.metadata is None or "x_proj" not in self.metadata.columns:
@@ -441,12 +441,31 @@ class RetrievalService:
         has_proj = self.metadata["x_proj"].notna()
         cols = [ID_COLUMN, "x_proj", "y_proj"]
         
-        # We also might want to return title or other metadata for tooltips, but the spec
-        # specifically requested the background points. Adding title to be safe for UI.
-        if "name" in self.metadata.columns:
-            cols.append("name")
-            
-        return self.metadata.loc[has_proj, cols].copy().reset_index(drop=True)
+        cols_to_check = ["name", "minutes", "n_ingredients"]
+        from recipe_discovery.data.schema import NUTRITION_COLUMNS
+        cols_to_check.extend(NUTRITION_COLUMNS)
+        
+        for c in cols_to_check:
+            if c in self.metadata.columns:
+                cols.append(c)
+                
+        df = self.metadata.loc[has_proj, cols].copy()
+        
+        kmeans_path = ARTIFACTS_DIR / "kmeans.joblib"
+        if kmeans_path.exists():
+            try:
+                from recipe_discovery.clustering.kmeans import KMeans
+                import numpy as np
+                model = KMeans.load(kmeans_path)
+                if hasattr(model, "labels_") and model.labels_ is not None:
+                    if len(model.labels_) == len(self.metadata):
+                        labels_array = np.asarray(model.labels_)
+                        mask = has_proj.to_numpy()
+                        df["cluster"] = [f"Cluster {int(lbl)}" for lbl in labels_array[mask]]
+            except Exception as e:
+                logger.warning(f"Failed to load clustering model labels: {e}")
+                
+        return df.reset_index(drop=True)
     def _search_candidates_for_vector(
         self,
         request: RetrievalRequest,
