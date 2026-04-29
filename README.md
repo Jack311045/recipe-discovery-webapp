@@ -49,8 +49,33 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3) Add data
-Put the Kaggle CSV files in:
+### 3) Add processed data + artifacts (required)
+The app expects a processed CSV plus embedding artifacts. These are stored
+outside of Git due to size.
+
+#### 3a) Add processed CSV
+Place the processed file at:
+- `data/processed/Processed_data_updated2.csv`
+
+If you already have a local `Processed_data_updated2.csv`, move it into
+`data/processed/`.
+
+#### 3b) Fetch embedding artifacts (Google Drive)
+Download the shared artifacts into `data/artifacts/`:
+
+```bash
+pip install -r requirements.txt
+python scripts/fetch_gdrive_artifacts.py --folder "https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
+```
+
+You can also set it once and reuse it:
+```bash
+export GDRIVE_ARTIFACTS_FOLDER="https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
+python scripts/fetch_gdrive_artifacts.py
+```
+
+#### Optional: raw Kaggle data (only if you plan to rebuild)
+If you want to rebuild the processed CSV, you will need the Kaggle raw files:
 - `data/raw/RAW_recipes.csv`
 - `data/raw/RAW_interactions.csv`
 
@@ -72,6 +97,9 @@ You can also set it once and reuse it:
 export GDRIVE_ARTIFACTS_FOLDER="https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
 python scripts/fetch_gdrive_artifacts.py
 ```
+
+The current preprocessing script is minimal and does not persist outputs.
+Rebuilding is not required for running the app.
 
 ### 4) Run the app
 ```bash
