@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 from pathlib import Path
 
@@ -25,6 +26,13 @@ from app.components.recipe_cards import render_recipe_card
 from app.service_loader import get_retrieval_service
 from recipe_discovery.retrieval.service import RetrievalRequest
 
+LANDING_QUERIES = [
+    "quick weeknight dinner",
+    "healthy breakfast ideas",
+    "easy comfort food",
+    "simple vegetarian recipes",
+]
+
 
 def _format_avg(value: float | int | None, *, unit: str = "", decimals: int = 1) -> str:
     """Format optional average metrics for display cards."""
@@ -37,14 +45,153 @@ def _format_avg(value: float | int | None, *, unit: str = "", decimals: int = 1)
     return f"{base} {unit}".strip()
 
 
+def _initialize_session_state() -> None:
+    """Initialize search-page session state keys."""
+    defaults = {
+        "search_results_df": None,
+        "last_query": "",
+        "last_search_mode": "",
+        "search_query_input": "",
+        "search_history": [],
+        "landing_results_df": None,
+        "landing_query": "",
+        "history_search_requested": False,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _add_to_history(query: str) -> None:
+    """Store a unique recent search query for this browser session."""
+    query = query.strip()
+    if not query:
+        return
+
+    history = [
+        item
+        for item in st.session_state["search_history"]
+        if item.lower() != query.lower()
+    ]
+    st.session_state["search_history"] = [query, *history][:5]
+
+
+def _select_history_query(query: str) -> None:
+    """Populate the text input from history and submit it on the next rerun."""
+    st.session_state["search_query_input"] = query
+    st.session_state["history_search_requested"] = True
+
+
+def _render_search_history() -> None:
+    """Render recent search chips below the text input."""
+    history = st.session_state["search_history"]
+    if not history:
+        return
+
+    st.caption("Recent searches")
+    cols = st.columns(min(len(history), 5))
+    for idx, query in enumerate(history):
+        label = query if len(query) <= 24 else f"{query[:21]}..."
+        with cols[idx]:
+            st.button(
+                label,
+                key=f"history_query_{idx}",
+                use_container_width=True,
+                on_click=_select_history_query,
+                args=(query,),
+            )
+
+
+def _render_skeleton_card() -> None:
+    """Render a lightweight placeholder card while retrieval runs."""
+    st.markdown(
+        """
+        <div class="result-skeleton">
+          <div class="sk-img"></div>
+          <div class="sk-body">
+            <div class="sk-line sk-title"></div>
+            <div class="sk-line sk-meta"></div>
+            <div class="sk-line sk-short"></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_skeleton_grid(count: int, *, label: str = "Searching recipes...") -> None:
+    """Render skeleton cards into a reserved result slot."""
+    st.markdown(f"**{label}**")
+    for _ in range(count):
+        _render_skeleton_card()
+
+
+def _load_landing_results() -> pd.DataFrame:
+    """Load and cache first-run landing results for this session."""
+    if st.session_state["landing_results_df"] is None:
+        svc = get_retrieval_service()
+        query = random.choice(LANDING_QUERIES)
+        request = RetrievalRequest(
+            query=query,
+            top_k=8,
+            max_time_minutes=45,
+            max_ingredients=15,
+            min_rating=4.0,
+        )
+        results = svc.search(request)
+        if results.empty:
+            fallback_request = RetrievalRequest(
+                query=query,
+                top_k=8,
+                max_time_minutes=45,
+                max_ingredients=15,
+            )
+            results = svc.search(fallback_request)
+
+        if "rating" in results.columns:
+            sort_columns = ["rating"]
+            sort_ascending = [False]
+            if "similarity_score" in results.columns:
+                sort_columns.append("similarity_score")
+                sort_ascending.append(False)
+            results = results.sort_values(
+                by=sort_columns,
+                ascending=sort_ascending,
+                kind="mergesort",
+            ).reset_index(drop=True)
+
+        st.session_state["landing_results_df"] = results.copy()
+        st.session_state["landing_query"] = query
+
+    return st.session_state["landing_results_df"]
+
+
+def _render_landing_state() -> None:
+    """Render first-run recipe cards before the user searches."""
+    landing_placeholder = st.empty()
+    if st.session_state["landing_results_df"] is None:
+        with landing_placeholder.container():
+            _render_skeleton_grid(8, label="Preparing popular picks...")
+
+    landing_df = _load_landing_results()
+    landing_placeholder.empty()
+
+    if landing_df.empty:
+        return
+
+    st.markdown("### Popular starting points")
+    st.caption(f"Showing highly rated matches for: {st.session_state['landing_query']}")
+
+    tag_columns = infer_tag_columns(landing_df)
+    for rank, (_, row) in enumerate(landing_df.iterrows(), start=1):
+        row_dict = row.to_dict()
+        row_dict["_active_tags"] = get_active_tags(row_dict, tag_columns, max_tags=8)
+        render_recipe_card(row_dict, rank=rank, display_mode="Compact")
+
+
 st.set_page_config(page_title="Search Recipes", layout="wide")
 
-if "search_results_df" not in st.session_state:
-    st.session_state["search_results_df"] = None
-if "last_query" not in st.session_state:
-    st.session_state["last_query"] = ""
-if "last_search_mode" not in st.session_state:
-    st.session_state["last_search_mode"] = ""
+_initialize_session_state()
 
 st.markdown(
     """
@@ -55,6 +202,41 @@ st.markdown(
         background: linear-gradient(120deg, #f6fbff 0%, #eef7f2 100%);
         border: 1px solid #d9e8dc;
         margin-bottom: 0.4rem;
+    }
+    .result-skeleton {
+        display: grid;
+        grid-template-columns: 260px 1fr;
+        gap: 1rem;
+        padding: 1rem;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        margin-bottom: 0.8rem;
+    }
+    .sk-img,
+    .sk-line {
+        background: #e5e7eb;
+        animation: pulse 1.2s ease-in-out infinite;
+    }
+    .sk-img {
+        height: 150px;
+        border-radius: 8px;
+    }
+    .sk-line {
+        height: 14px;
+        border-radius: 6px;
+        margin-bottom: 0.75rem;
+    }
+    .sk-title { width: 70%; height: 22px; }
+    .sk-meta { width: 45%; }
+    .sk-short { width: 58%; }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.45; }
+    }
+    @media (max-width: 700px) {
+        .result-skeleton {
+            grid-template-columns: 1fr;
+        }
     }
     </style>
     """,
@@ -74,7 +256,7 @@ st.caption("Semantic retrieval powered by sentence-transformer embeddings + cosi
 # Sidebar filters
 with st.sidebar:
     st.header("Filters")
-    st.caption("These controls narrow results after semantic matching.")
+    st.caption("Optional controls narrow results after semantic matching.")
     diet_options = {
         "Any": None,
         "Vegetarian": "vegetarian",
@@ -86,8 +268,28 @@ with st.sidebar:
         list(diet_options.keys()),
         help="Keeps retrieval behavior unchanged; only filters returned recipes.",
     )
-    max_time = st.slider("Max cooking time (minutes)", min_value=5, max_value=180, value=60, step=5)
-    max_ingredients = st.slider("Max ingredients", min_value=2, max_value=30, value=15, step=1)
+    use_time_limit = st.checkbox("Apply max cooking time filter", value=False)
+    max_time = None
+    if use_time_limit:
+        max_time = st.slider(
+            "Max cooking time (minutes)",
+            min_value=5,
+            max_value=180,
+            value=60,
+            step=5,
+        )
+
+    use_ingredient_limit = st.checkbox("Apply max ingredients filter", value=False)
+    max_ingredients = None
+    if use_ingredient_limit:
+        max_ingredients = st.slider(
+            "Max ingredients",
+            min_value=2,
+            max_value=30,
+            value=15,
+            step=1,
+        )
+
     top_k = st.slider("Number of results", min_value=3, max_value=20, value=8)
     alpha = st.slider(
         "Image vs text weight (combined search)",
@@ -103,8 +305,10 @@ col_text, col_upload = st.columns([2, 1])
 with col_text:
     query = st.text_input(
         "Describe what you want to eat",
-        placeholder="quick spicy tofu dinner…",
+        placeholder="quick spicy tofu dinner...",
+        key="search_query_input",
     )
+    _render_search_history()
 
 with col_upload:
     uploaded_file = st.file_uploader(
@@ -114,8 +318,10 @@ with col_upload:
     )
 
 search_clicked = st.button("Search", type="primary", use_container_width=True)
+history_search_requested = bool(st.session_state.pop("history_search_requested", False))
+run_search = search_clicked or history_search_requested
 
-if search_clicked:
+if run_search:
     svc = get_retrieval_service()
     request = RetrievalRequest(
         query=query,
@@ -124,32 +330,39 @@ if search_clicked:
         max_time_minutes=max_time,
         max_ingredients=max_ingredients,
     )
+    has_query = bool(query.strip())
+    has_image = uploaded_file is not None
+    results_placeholder = st.empty()
 
-    if uploaded_file is not None and query.strip():
+    if has_query or has_image:
+        with results_placeholder.container():
+            _render_skeleton_grid(top_k)
+
+    if has_image and has_query:
         image = Image.open(uploaded_file)
         st.image(image, caption="Searching with image + text…", width=220)
-        with st.spinner("Searching with image + text…"):
-            results = svc.search_combined(query, image, request, alpha=alpha)
+        results = svc.search_combined(query, image, request, alpha=alpha)
         search_mode = "image+text"
-    elif uploaded_file is not None:
+    elif has_image:
         image = Image.open(uploaded_file)
         st.image(image, caption="Searching by this image…", width=220)
-        with st.spinner("Searching with image…"):
-            results = svc.search_by_image(image, request)
+        results = svc.search_by_image(image, request)
         search_mode = "image"
-    elif query.strip():
-        with st.spinner("🔎 Searching and preparing rich recipe cards…"):
-            results = svc.search(request)
+    elif has_query:
+        results = svc.search(request)
         search_mode = "text"
     else:
         st.warning("Please enter a search query or upload an image.")
         results = None
         search_mode = ""
 
+    results_placeholder.empty()
+
     if isinstance(results, pd.DataFrame):
         st.session_state["search_results_df"] = results.copy()
         st.session_state["last_query"] = query.strip()
         st.session_state["last_search_mode"] = search_mode
+        _add_to_history(query)
 
 results_df = st.session_state.get("search_results_df")
 search_query = st.session_state.get("last_query", "")
@@ -225,3 +438,5 @@ if isinstance(results_df, pd.DataFrame):
                 rank=rank,
                 display_mode=display_mode,
             )
+else:
+    _render_landing_state()
