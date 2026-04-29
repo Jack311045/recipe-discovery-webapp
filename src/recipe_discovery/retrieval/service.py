@@ -21,6 +21,7 @@ from recipe_discovery.embeddings.encoder import EmbeddingConfig, RecipeEncoder
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.filters import apply_basic_filters
+from recipe_discovery.retrieval.image_fetcher import attach_foodcom_images
 from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
 from recipe_discovery.settings import ARTIFACTS_DIR, DATA_PROCESSED_DIR
@@ -263,6 +264,10 @@ class RetrievalService:
 
         meta_ids = self._normalize_recipe_ids(self.metadata[ID_COLUMN])
         self.metadata["image_url"] = meta_ids.map(image_map).fillna(FALLBACK_IMAGE_URL)
+
+    def _attach_foodcom_images(self, results: pd.DataFrame) -> pd.DataFrame:
+        """Patch missing images in a result frame via Food.com lookup."""
+        return attach_foodcom_images(results, fallback_image=FALLBACK_IMAGE_URL)
 
     def load(
         self,
@@ -605,7 +610,8 @@ class RetrievalService:
             rating_weight=rating_weight,
             regression_model_path=regression_model_path,
         )
-        return reranked.head(request.top_k).reset_index(drop=True)
+        results = reranked.head(request.top_k).reset_index(drop=True)
+        return self._attach_foodcom_images(results)
 
     def search(self, request: RetrievalRequest) -> pd.DataFrame:
         """Return filtered top-k recipe matches for a query.
@@ -613,7 +619,8 @@ class RetrievalService:
         This v1 runtime path intentionally performs direct cosine scoring
         against the loaded embedding matrix before candidate-pool filtering.
         """
-        return self._search_candidates(request, limit_to_top_k=True)
+        results = self._search_candidates(request, limit_to_top_k=True)
+        return self._attach_foodcom_images(results)
 
     def search_by_image(self, image: Image.Image, request: RetrievalRequest) -> pd.DataFrame:
         """Return filtered top-k recipe matches for an uploaded image."""
@@ -625,12 +632,13 @@ class RetrievalService:
             raise RuntimeError("SigLIP embeddings failed to load.")
 
         query_vec = self._encode_image(image)
-        return self._search_candidates_for_vector(
+        results = self._search_candidates_for_vector(
             request,
             query_vec=query_vec,
             embeddings=self._siglip_embeddings,
             limit_to_top_k=True,
         )
+        return self._attach_foodcom_images(results)
 
     def search_combined(
         self,
@@ -688,4 +696,5 @@ class RetrievalService:
             return filtered
 
         ranked = filtered.sort_values("similarity_score", ascending=False)
-        return ranked.head(request.top_k).reset_index(drop=True)
+        results = ranked.head(request.top_k).reset_index(drop=True)
+        return self._attach_foodcom_images(results)
