@@ -95,25 +95,35 @@ def _load_cluster_assignments() -> pd.DataFrame | None:
 
 @st.cache_data(show_spinner="Naming clusters…")
 def _build_cluster_name_map(
-    projection_df: pd.DataFrame,
-    cluster_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
     text_columns: tuple[str, ...],
 ) -> dict[int, str]:
     """Generate a cluster_id -> human-readable name mapping using the
-    distinctive-word naming pipeline. Returns a dict like
+    distinctive-word naming pipeline. Expects a DataFrame that already has
+    both the text columns and a ``cluster`` column attached.
+
+    Returns a dict like
     ``{0: "pasta: spaghetti, lasagna", 1: "cake: pie, muffins", ...}``.
     """
-    available_text = [c for c in text_columns if c in projection_df.columns]
-    if not available_text:
-        # Projection frame has no text fields — fall back to "Cluster N" labels.
-        return {int(c): f"Cluster {int(c)}" for c in cluster_df["cluster"].unique()}
+    if "cluster" not in merged_df.columns:
+        return {}
 
-    merged = projection_df.merge(cluster_df, on="recipe_id", how="inner")
-    if merged.empty:
-        return {int(c): f"Cluster {int(c)}" for c in cluster_df["cluster"].unique()}
+    available_text = [c for c in text_columns if c in merged_df.columns]
+    if not available_text:
+        # No text columns to mine — fall back to "Cluster N" labels.
+        unique = merged_df["cluster"].dropna().unique()
+        return {int(c): f"Cluster {int(c)}" for c in unique}
+
+    # Drop rows where cluster is null (recipes in the projection DataFrame that
+    # didn't get a cluster assignment). name_clusters needs a non-null integer
+    # cluster column.
+    clean = merged_df.dropna(subset=["cluster"]).copy()
+    if clean.empty:
+        return {}
+    clean["cluster"] = clean["cluster"].astype(int)
 
     named = name_clusters(
-        merged,
+        clean,
         text_columns=tuple(available_text),
         vocabulary=list(_CONCEPT_VOCABULARY),
         top_n=6,
@@ -158,9 +168,17 @@ cluster_df = _load_cluster_assignments()
 cluster_name_map: dict[int, str] = {}
 
 if cluster_df is not None and "recipe_id" in all_proj.columns:
+    # Coerce both sides to a consistent string dtype before merging — the
+    # retrieval service returns recipe_id as string, while our cluster_df
+    # uses int64. Cast both to str so the join is independent of upstream
+    # column types.
+    all_proj = all_proj.copy()
+    all_proj["recipe_id"] = all_proj["recipe_id"].astype(str)
+    cluster_df = cluster_df.copy()
+    cluster_df["recipe_id"] = cluster_df["recipe_id"].astype(str)
     all_proj = all_proj.merge(cluster_df, on="recipe_id", how="left")
     cluster_name_map = _build_cluster_name_map(
-        all_proj, cluster_df, text_columns=("name", "description")
+        all_proj, text_columns=("name", "description")
     )
     if cluster_name_map:
         all_proj["cluster_name"] = all_proj["cluster"].map(
