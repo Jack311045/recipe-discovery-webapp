@@ -15,9 +15,6 @@ SORT_OPTIONS = [
     "Fewest ingredients",
 ]
 
-DISPLAY_MODES = ["Detailed", "Compact"]
-
-
 def _as_float(value: object) -> float | None:
     """Convert a value to float, returning None for invalid values."""
     try:

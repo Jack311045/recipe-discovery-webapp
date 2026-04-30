@@ -46,14 +46,17 @@ class RecipeEncoder:
 
         logger.info("Loading model: %s", self.config.model_name)
         self.model = SentenceTransformer(self.config.model_name)
-        logger.info("Model loaded. Embedding dim = %d", self.model.get_embedding_dimension())
+        logger.info(
+            "Model loaded. Embedding dim = %d",
+            self.model.get_sentence_embedding_dimension(),
+        )
 
     @property
     def embedding_dim(self) -> int:
         """Return the dimensionality of the loaded model's output."""
         if self.model is None:
             raise RuntimeError("Model not loaded. Call `load()` first.")
-        return self.model.get_embedding_dimension()
+        return self.model.get_sentence_embedding_dimension()
 
     def encode(self, texts: Iterable[str], *, show_progress: bool = True) -> np.ndarray:
         """Encode recipe texts into dense vectors.

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from app.components.theme import apply_restaurant_menu_theme
 from recipe_discovery.clustering.kmeans import KMeans
 from recipe_discovery.clustering.labels import name_clusters
 from recipe_discovery.clustering.service import attach_cluster_assignments
@@ -22,6 +23,8 @@ from recipe_discovery.data.load import load_processed_recipes
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.evaluation.clustering_eval import cluster_sizes
 from recipe_discovery.settings import ARTIFACTS_DIR
+
+apply_restaurant_menu_theme()
 
 # ---------------------------------------------------------------------------
 # Page header

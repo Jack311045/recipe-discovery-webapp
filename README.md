@@ -13,8 +13,7 @@ Given a natural-language food request and optional dietary constraints, return t
 - K-means clustering on recipe embeddings
 - Regression model for recipe quality or rating prediction
 - PCA and deep autoencoder for 2D visualization
-- Optional classification module for recipe tag prediction
-- Explicit train / validation / test support and k-fold hooks for evaluation
+- Classification module for recipe tag prediction
 
 ## Quick start
 
@@ -72,13 +71,12 @@ streamlit run app/streamlit_app.py
 - `src/recipe_discovery/`: main package
 - `tests/`: smoke and unit tests
 
-## Expected MVP workflow
+## MVP workflow
 
 1. Clean and merge recipe data
 2. Build recipe text fields
 3. Compute recipe embeddings
 4. Run cosine retrieval for user queries
 5. Fit k-means clusters for exploration
-6. Fit regression ranking signal
-7. Produce 2D projection with PCA
-8. Surface everything in Streamlit
+6. Produce 2D projection with PCA
+7. Surface everything in Streamlit

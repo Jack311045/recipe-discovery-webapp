@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import streamlit as st
 
@@ -122,7 +122,11 @@ def _resolve_existing_key(items: dict[str, dict[str, object]], normalized_name: 
         return normalized_name
 
     # Conservative plural handling to merge common one-letter plural variants.
-    if normalized_name.endswith("s") and len(normalized_name) > 3 and not normalized_name.endswith("ss"):
+    if (
+        normalized_name.endswith("s")
+        and len(normalized_name) > 3
+        and not normalized_name.endswith("ss")
+    ):
         singular = normalized_name[:-1]
         if singular in items:
             return singular
@@ -140,6 +144,42 @@ def infer_item_category(normalized_name: str) -> str:
         if any(keyword in normalized_name for keyword in keywords):
             return category
     return "other"
+
+
+def _clean_source_recipes(raw_sources: object) -> list[str]:
+    if not isinstance(raw_sources, list):
+        return []
+
+    cleaned: list[str] = []
+    for source in raw_sources:
+        source_text = _clean_display_name(source)
+        if source_text and source_text not in cleaned:
+            cleaned.append(source_text)
+    return cleaned
+
+
+def _sanitize_shopping_item(
+    raw_key: object,
+    raw_item: Mapping[str, object],
+) -> tuple[str, dict[str, object]] | None:
+    normalized_name = normalize_ingredient_name(
+        raw_item.get("normalized_name") or raw_key
+    )
+    if not normalized_name:
+        return None
+
+    display_name = _clean_display_name(raw_item.get("display_name") or normalized_name)
+    category = str(raw_item.get("category") or "").strip().lower()
+    if category not in {*_CATEGORY_KEYWORDS.keys(), "other"}:
+        category = infer_item_category(normalized_name)
+
+    return normalized_name, {
+        "normalized_name": normalized_name,
+        "display_name": display_name or normalized_name,
+        "checked": bool(raw_item.get("checked", False)),
+        "category": category,
+        "source_recipes": _clean_source_recipes(raw_item.get("source_recipes")),
+    }
 
 
 def merge_ingredients(
@@ -206,11 +246,18 @@ def get_shopping_items() -> list[dict[str, object]]:
     ensure_shopping_list_state()
     items: dict[str, dict[str, object]] = st.session_state[SHOPPING_LIST_STATE_KEY]
     values = list(items.values())
-    values.sort(key=lambda item: (bool(item.get("checked")), str(item.get("display_name", "")).lower()))
+    values.sort(
+        key=lambda item: (
+            bool(item.get("checked")),
+            str(item.get("display_name", "")).lower(),
+        )
+    )
     return values
 
 
-def get_grouped_shopping_items(group_by_category: bool = True) -> dict[str, list[dict[str, object]]]:
+def get_grouped_shopping_items(
+    group_by_category: bool = True,
+) -> dict[str, list[dict[str, object]]]:
     """Return grouped shopping items with predictable category ordering."""
     items = get_shopping_items()
     if not group_by_category:
