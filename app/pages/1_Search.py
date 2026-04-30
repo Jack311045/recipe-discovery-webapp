@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 from pathlib import Path
@@ -10,12 +11,18 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-import pandas as pd
 import streamlit as st
+
+from app.components.theme import apply_restaurant_menu_theme
+
+st.set_page_config(page_title="Search Recipes", layout="wide")
+apply_restaurant_menu_theme()
+
+import pandas as pd
+import streamlit.components.v1 as components
 from PIL import Image
 
 from app.components.search_ui import (
-    DISPLAY_MODES,
     SORT_OPTIONS,
     build_result_summary,
     get_active_tags,
@@ -23,14 +30,17 @@ from app.components.search_ui import (
     sort_results_for_display,
 )
 from app.components.recipe_cards import parse_ingredients, render_recipe_card
+from app.components.search_state import (
+    SEARCH_STATE_QUERY_PARAM,
+    restore_search_snapshot,
+    save_search_snapshot,
+)
 from app.components.shopping_list import (
     add_ingredients_to_shopping_list,
     ensure_shopping_list_state,
     get_shopping_list_count,
 )
-from app.components.theme import apply_restaurant_menu_theme
 from app.service_loader import get_retrieval_service
-from recipe_discovery.retrieval.service import RetrievalRequest
 
 LANDING_QUERIES = [
     "quick weeknight dinner",
@@ -62,12 +72,56 @@ def _initialize_session_state() -> None:
         "landing_results_df": None,
         "landing_query": "",
         "history_search_requested": False,
+        "feedback_query_vec": None,
+        "feedback_excluded_ids": set(),
+        "feedback_active_request": None,
+        "feedback_embedding_space": "text",
+        "upload_widget_version": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
     ensure_shopping_list_state()
+
+
+def _reset_feedback() -> None:
+    """Clear relevance-feedback state for a new search context."""
+    st.session_state["feedback_query_vec"] = None
+    st.session_state["feedback_excluded_ids"] = set()
+    st.session_state["feedback_active_request"] = None
+    st.session_state["feedback_embedding_space"] = "text"
+
+
+def _get_query_param(name: str) -> str:
+    """Read a single query parameter across Streamlit versions."""
+    if hasattr(st, "query_params"):
+        raw_value = st.query_params.get(name, "")
+        if isinstance(raw_value, list):
+            return str(raw_value[0]) if raw_value else ""
+        return str(raw_value or "")
+
+    get_query_params = getattr(st, "experimental_get_query_params", None)
+    if get_query_params is None:
+        return ""
+
+    raw_value = get_query_params().get(name, [])
+    if isinstance(raw_value, list):
+        return str(raw_value[0]) if raw_value else ""
+    return str(raw_value or "")
+
+
+def _restore_cached_search_from_query() -> None:
+    """Restore search results cached before cross-page navigation."""
+    token = _get_query_param(SEARCH_STATE_QUERY_PARAM)
+    if token:
+        restore_search_snapshot(token, st.session_state)
+
+
+def _save_current_search_snapshot() -> None:
+    """Persist current search state so raw page navigation can restore it."""
+    if isinstance(st.session_state.get("search_results_df"), pd.DataFrame):
+        save_search_snapshot(st.session_state)
 
 
 def _add_to_history(query: str) -> None:
@@ -84,30 +138,61 @@ def _add_to_history(query: str) -> None:
     st.session_state["search_history"] = [query, *history][:5]
 
 
-def _select_history_query(query: str) -> None:
-    """Populate the text input from history and submit it on the next rerun."""
-    st.session_state["search_query_input"] = query
-    st.session_state["history_search_requested"] = True
+def _submit_search_from_text() -> None:
+    """Submit the current text query when the input commits with Enter."""
+    query = str(st.session_state.get("search_query_input", "")).strip()
+    if query:
+        st.session_state["history_search_requested"] = True
 
 
-def _render_search_history() -> None:
-    """Render recent search chips below the text input."""
+def _attach_search_history_to_input() -> None:
+    """Attach recent searches to the native search input as datalist suggestions."""
     history = st.session_state["search_history"]
     if not history:
         return
 
-    st.caption("Recent searches")
-    cols = st.columns(min(len(history), 5))
-    for idx, query in enumerate(history):
-        label = query if len(query) <= 24 else f"{query[:21]}..."
-        with cols[idx]:
-            st.button(
-                label,
-                key=f"history_query_{idx}",
-                use_container_width=True,
-                on_click=_select_history_query,
-                args=(query,),
-            )
+    history_json = json.dumps(history)
+    components.html(
+        f"""
+        <script>
+        (() => {{
+            const history = {history_json};
+            const listId = "recipe-search-history-list";
+            const attach = () => {{
+                const doc = window.parent.document;
+                const inputs = Array.from(doc.querySelectorAll("input"));
+                const input = inputs.find((node) =>
+                    node.getAttribute("aria-label") === "Search" ||
+                    node.getAttribute("placeholder") === "quick spicy tofu dinner..."
+                );
+                if (!input) {{
+                    window.setTimeout(attach, 80);
+                    return;
+                }}
+
+                let list = doc.getElementById(listId);
+                if (!list) {{
+                    list = doc.createElement("datalist");
+                    list.id = listId;
+                    doc.body.appendChild(list);
+                }}
+
+                list.innerHTML = "";
+                history.forEach((query) => {{
+                    const option = doc.createElement("option");
+                    option.value = query;
+                    list.appendChild(option);
+                }});
+
+                input.setAttribute("list", listId);
+                input.setAttribute("autocomplete", "off");
+            }};
+            attach();
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _render_skeleton_card() -> None:
@@ -134,9 +219,24 @@ def _render_skeleton_grid(count: int, *, label: str = "Searching recipes...") ->
         _render_skeleton_card()
 
 
+def _clear_uploaded_image() -> None:
+    """Reset the file uploader by changing its widget key."""
+    st.session_state["upload_widget_version"] += 1
+
+
+def _open_uploaded_image(uploaded_file) -> Image.Image:
+    """Open an uploaded image without leaving the file pointer consumed."""
+    uploaded_file.seek(0)
+    image = Image.open(uploaded_file).copy()
+    uploaded_file.seek(0)
+    return image
+
+
 def _load_landing_results() -> pd.DataFrame:
     """Load and cache first-run landing results for this session."""
     if st.session_state["landing_results_df"] is None:
+        from recipe_discovery.retrieval.service import RetrievalRequest
+
         svc = get_retrieval_service()
         query = random.choice(LANDING_QUERIES)
         request = RetrievalRequest(
@@ -191,16 +291,13 @@ def _render_landing_state() -> None:
     st.caption(f"Showing highly rated matches for: {st.session_state['landing_query']}")
 
     tag_columns = infer_tag_columns(landing_df)
-    for rank, (_, row) in enumerate(landing_df.iterrows(), start=1):
-        row_dict = row.to_dict()
-        row_dict["_active_tags"] = get_active_tags(row_dict, tag_columns, max_tags=8)
-        render_recipe_card(
-            row_dict,
-            rank=rank,
-            display_mode="Compact",
-            on_add_to_shopping_list=_add_recipe_to_shopping_list,
-            widget_key_prefix="landing",
-        )
+    _render_result_grid(
+        landing_df,
+        tag_columns=tag_columns,
+        max_tags=8,
+        search_mode="landing",
+        show_feedback=True,
+    )
 
 
 def _add_recipe_to_shopping_list(recipe: dict[str, object]) -> None:
@@ -225,16 +322,88 @@ def _add_recipe_to_shopping_list(recipe: dict[str, object]) -> None:
         f"{', merged ' + str(merged_count) if merged_count else ''}. "
         f"Total items: {total_count}."
     )
-    if hasattr(st, "toast"):
-        st.toast(message)
-    else:
-        st.success(message)
+    st.session_state["shopping_list_notice"] = message
+    st.rerun()
 
 
-st.set_page_config(page_title="Search Recipes", layout="wide")
-apply_restaurant_menu_theme()
+def _on_negative_feedback(recipe_id: str) -> None:
+    """Apply negative feedback to the active text-search results or landing results."""
+    excluded = st.session_state["feedback_excluded_ids"]
+    excluded.add(str(recipe_id))
+
+    current = st.session_state.get("search_results_df")
+    
+    # If no search is active, user is dismissing a landing page card
+    if current is None:
+        landing_df = st.session_state.get("landing_results_df")
+        if isinstance(landing_df, pd.DataFrame) and "recipe_id" in landing_df.columns:
+            keep = landing_df["recipe_id"].astype(str) != str(recipe_id)
+            st.session_state["landing_results_df"] = landing_df.loc[keep].reset_index(drop=True)
+        return
+
+    query_vec = st.session_state.get("feedback_query_vec")
+    request = st.session_state.get("feedback_active_request")
+    if query_vec is None or request is None:
+        if isinstance(current, pd.DataFrame) and "recipe_id" in current.columns:
+            keep = current["recipe_id"].astype(str) != str(recipe_id)
+            st.session_state["search_results_df"] = current.loc[keep].reset_index(drop=True)
+            _save_current_search_snapshot()
+        return
+
+    svc = get_retrieval_service()
+    results = svc.search_with_negative_feedback(
+        request,
+        query_vec=query_vec,
+        negative_recipe_ids=excluded,
+        alpha=0.3,
+        embedding_space=str(st.session_state.get("feedback_embedding_space") or "text"),
+    )
+    st.session_state["search_results_df"] = results.copy()
+    _save_current_search_snapshot()
+
+
+def _render_result_grid(
+    display_df: pd.DataFrame,
+    *,
+    tag_columns: list[str],
+    max_tags: int,
+    search_mode: str,
+    show_feedback: bool,
+) -> None:
+    """Render detailed recipe cards in a two-column grid."""
+    columns_per_row = 2
+    for start in range(0, len(display_df), columns_per_row):
+        cols = st.columns(columns_per_row, gap="medium")
+        chunk = display_df.iloc[start : start + columns_per_row]
+        for offset, (_, row) in enumerate(chunk.iterrows()):
+            rank = start + offset + 1
+            row_dict = row.to_dict()
+            row_dict["_active_tags"] = get_active_tags(
+                row_dict,
+                tag_columns,
+                max_tags=max_tags,
+            )
+            recipe_id = str(row_dict.get("recipe_id") or row_dict.get("id") or rank)
+            with cols[offset]:
+                render_recipe_card(
+                    row_dict,
+                    rank=rank,
+                    display_mode="Detailed",
+                    on_add_to_shopping_list=_add_recipe_to_shopping_list,
+                    on_negative_feedback=_on_negative_feedback if show_feedback else None,
+                    feedback_key=f"feedback_{recipe_id}_{rank}" if show_feedback else None,
+                    widget_key_prefix=f"results_{search_mode or 'text'}",
+                )
+
 
 _initialize_session_state()
+_restore_cached_search_from_query()
+shopping_list_notice = st.session_state.pop("shopping_list_notice", None)
+if shopping_list_notice:
+    if hasattr(st, "toast"):
+        st.toast(shopping_list_notice)
+    else:
+        st.success(shopping_list_notice)
 
 st.markdown(
     """
@@ -276,21 +445,161 @@ st.markdown(
             grid-template-columns: 1fr;
         }
     }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor),
+    div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor),
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) {
+        position: fixed !important;
+        top: 0.55rem !important;
+        left: 1rem !important;
+        transform: none !important;
+        z-index: 99999 !important;
+        width: min(calc(100vw - 8.25rem), 1180px) !important;
+        box-sizing: border-box;
+        background: linear-gradient(180deg, rgba(255, 250, 241, 0.99) 0%, rgba(246, 235, 211, 0.99) 100%);
+        border: none;
+        border-bottom: 1px solid #b79f73;
+        border-radius: 0 0 10px 10px;
+        box-shadow: 0 4px 14px rgba(72, 48, 31, 0.12);
+        margin-bottom: 0.55rem;
+        overflow: visible;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) > div,
+    div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor) > div,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) > div {
+        padding: 0.28rem 0.55rem 0.34rem 0.55rem;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stVerticalBlock"],
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stVerticalBlock"] {
+        gap: 0.22rem;
+    }
+    .search-toolbar-anchor {
+        height: 0;
+        margin: 0;
+        padding: 0;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stTextInput label,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] label,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stSelectbox"] label,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stRadio"] label,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stSlider"] label,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stTextInput label,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] label,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stSelectbox"] label,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stRadio"] label,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stSlider"] label {
+        font-size: 0.72rem;
+        margin-bottom: 0;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stTextInput input,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stTextInput input {
+        min-height: 2.08rem;
+        padding-top: 0.15rem;
+        padding-bottom: 0.15rem;
+        font-size: 0.9rem;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section {
+        min-height: 2.08rem !important;
+        height: 2.08rem !important;
+        padding: 0.05rem 0.2rem !important;
+        overflow: hidden;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div {
+        gap: 0.15rem !important;
+        padding: 0 !important;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploaderDropzoneInstructions"],
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] small,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div > div:first-child,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] div:has(> small),
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploaderDropzoneInstructions"],
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] small,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div > div:first-child,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] div:has(> small) {
+        display: none !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div {
+        color: transparent !important;
+        font-size: 0 !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button {
+        color: white !important;
+        font-size: 0.78rem !important;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section p,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section small,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section [data-testid="stMarkdownContainer"],
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section p,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section small,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section [data-testid="stMarkdownContainer"] {
+        display: none !important;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-baseweb="select"] > div,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-baseweb="select"] > div {
+        min-height: 1.86rem !important;
+        font-size: 0.78rem;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button,
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stButton > button,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stButton > button {
+        min-height: 2.08rem;
+        padding: 0.08rem 0.5rem;
+        white-space: nowrap;
+        font-size: 0.78rem;
+    }
+    .upload-preview-row {
+        display: grid;
+        grid-template-columns: 42px 1fr;
+        gap: 0.35rem;
+        align-items: center;
+        margin-top: 0.18rem;
+        min-height: 2.1rem;
+    }
+    .upload-empty {
+        min-height: 1.62rem;
+        border: 1px dashed rgba(183, 159, 115, 0.8);
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #6c5848;
+        font-size: 0.72rem;
+        background: rgba(255, 253, 247, 0.68);
+    }
+    .upload-thumb-note {
+        font-size: 0.7rem;
+        color: #6c5848;
+        line-height: 1.15;
+    }
+    .search-action-spacer {
+        height: 0;
+    }
+    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) div[data-testid="column"] .stButton > button,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) div[data-testid="column"] .stButton > button {
+        min-height: 1.55rem;
+        padding: 0.08rem 0.45rem;
+        font-size: 0.72rem;
+        box-shadow: none;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    @media (max-width: 760px) {
+        div[data-testid="stElementContainer"]:has(.search-toolbar-anchor),
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor),
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) {
+            top: 3.1rem;
+            left: 0.35rem;
+            right: 0.35rem;
+            width: auto;
+            transform: none;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
-st.markdown(
-    """
-    <div class="search-hero">
-            <p class="search-kicker">Today's Menu</p>
-            <h2>Search Recipes</h2>
-            <p>Search by text or upload a dish photo, then explore polished recipe cards and frontend-only display controls.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.caption("Semantic retrieval powered by sentence-transformer embeddings + cosine similarity.")
 
 # Sidebar filters
 with st.sidebar:
@@ -338,33 +647,86 @@ with st.sidebar:
         step=0.05,
         help="Higher keeps the uploaded dish as the anchor. Lower lets the text steer more.",
     )
-    st.markdown("---")
-    st.caption(f"Shopping list items: {get_shopping_list_count()}")
-    st.caption("Open the Shopping List page to review, check off, or edit items.")
 
-col_text, col_upload = st.columns([2, 1])
+# Compact spacer to keep results below the fixed search toolbar.
+st.markdown("<div style='height: 3.1rem; width: 100%; display: block;'></div>", unsafe_allow_html=True)
 
-with col_text:
-    query = st.text_input(
-        "Describe what you want to eat",
-        placeholder="quick spicy tofu dinner...",
-        key="search_query_input",
+with st.container(border=True):
+    st.markdown(
+        """
+        <div class="search-toolbar-anchor"></div>
+        """,
+        unsafe_allow_html=True,
     )
-    _render_search_history()
+    col_text, col_search, col_upload = st.columns([5.9, 1.05, 1.85], gap="small")
 
-with col_upload:
-    uploaded_file = st.file_uploader(
-        "Or upload a dish photo",
-        type=["png", "jpg", "jpeg"],
-        help="Image search uses SigLIP embeddings; text search stays on SBERT.",
-    )
+    with col_text:
+        query = st.text_input(
+            "Search",
+            placeholder="quick spicy tofu dinner...",
+            key="search_query_input",
+            on_change=_submit_search_from_text,
+            autocomplete="off",
+            label_visibility="collapsed",
+        )
+        _attach_search_history_to_input()
 
-search_clicked = st.button("Search", type="primary", use_container_width=True)
+    with col_search:
+        search_clicked = st.button("Search", type="primary", use_container_width=True)
+
+    with col_upload:
+        upload_key = f"photo_upload_{st.session_state['upload_widget_version']}"
+        uploaded_file = st.file_uploader(
+            "Photo",
+            type=["png", "jpg", "jpeg"],
+            help="Upload a dish photo for image search. Maximum size: 50 MB.",
+            key=upload_key,
+            label_visibility="collapsed",
+        )
+        if uploaded_file is None:
+            st.markdown("<div class='upload-empty'>Photo optional</div>", unsafe_allow_html=True)
+        else:
+            preview_cols = st.columns([0.65, 1.2], gap="small")
+            with preview_cols[0]:
+                st.image(_open_uploaded_image(uploaded_file), width=42)
+            with preview_cols[1]:
+                st.markdown(
+                    "<div class='upload-thumb-note'>Image ready</div>",
+                    unsafe_allow_html=True,
+                )
+                st.button(
+                    "Remove",
+                    key="clear_uploaded_image",
+                    use_container_width=True,
+                    on_click=_clear_uploaded_image,
+                )
+
+    col_sort, col_tags = st.columns([1.35, 1.8], gap="small")
+    with col_sort:
+        sort_mode = st.selectbox(
+            "Sort displayed results",
+            SORT_OPTIONS,
+            index=0,
+            help="Display-only ordering. Retrieval and backend ranking are unchanged.",
+            label_visibility="collapsed",
+        )
+    with col_tags:
+        max_tags = st.slider(
+            "Maximum tag chips shown per recipe",
+            min_value=3,
+            max_value=12,
+            value=8,
+            help="Tag chips are visual only and do not affect ranking/filter behavior.",
+            label_visibility="collapsed",
+        )
 history_search_requested = bool(st.session_state.pop("history_search_requested", False))
 run_search = search_clicked or history_search_requested
 
 if run_search:
+    from recipe_discovery.retrieval.service import RetrievalRequest
+
     svc = get_retrieval_service()
+    _reset_feedback()
     request = RetrievalRequest(
         query=query,
         top_k=top_k,
@@ -381,16 +743,37 @@ if run_search:
             _render_skeleton_grid(top_k)
 
     if has_image and has_query:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Searching with image + text…", width=220)
-        results = svc.search_combined(query, image, request, alpha=alpha)
-        search_mode = "image+text"
+        image = _open_uploaded_image(uploaded_file)
+        try:
+            results = svc.search_combined(query, image, request, alpha=alpha)
+            st.session_state["feedback_query_vec"] = svc.encode_combined_query(
+                query,
+                image,
+                alpha=alpha,
+            )
+            st.session_state["feedback_active_request"] = request
+            st.session_state["feedback_embedding_space"] = "siglip"
+            search_mode = "image+text"
+        except RuntimeError as exc:
+            st.warning(f"Image search is unavailable: {exc}")
+            results = None
+            search_mode = ""
     elif has_image:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Searching by this image…", width=220)
-        results = svc.search_by_image(image, request)
-        search_mode = "image"
+        image = _open_uploaded_image(uploaded_file)
+        try:
+            results = svc.search_by_image(image, request)
+            st.session_state["feedback_query_vec"] = svc.encode_image_query(image)
+            st.session_state["feedback_active_request"] = request
+            st.session_state["feedback_embedding_space"] = "siglip"
+            search_mode = "image"
+        except RuntimeError as exc:
+            st.warning(f"Image search is unavailable: {exc}")
+            results = None
+            search_mode = ""
     elif has_query:
+        st.session_state["feedback_query_vec"] = svc.encode_text_query(query)
+        st.session_state["feedback_active_request"] = request
+        st.session_state["feedback_embedding_space"] = "text"
         results = svc.search(request)
         search_mode = "text"
     else:
@@ -405,6 +788,8 @@ if run_search:
         st.session_state["last_query"] = query.strip()
         st.session_state["last_search_mode"] = search_mode
         _add_to_history(query)
+        _save_current_search_snapshot()
+        st.rerun()
 
 results_df = st.session_state.get("search_results_df")
 search_query = st.session_state.get("last_query", "")
@@ -432,34 +817,9 @@ if isinstance(results_df, pd.DataFrame):
         with summary_cols[3]:
             st.metric("Avg calories", _format_avg(summary["avg_calories"], unit="kcal", decimals=0))
 
-        st.markdown("### Display controls")
-        control_cols = st.columns([2, 2, 3])
-        with control_cols[0]:
-            sort_mode = st.selectbox(
-                "Sort displayed results",
-                SORT_OPTIONS,
-                index=0,
-                help="Display-only ordering. Retrieval and backend ranking are unchanged.",
-            )
-        with control_cols[1]:
-            display_mode = st.radio(
-                "Card view",
-                DISPLAY_MODES,
-                horizontal=True,
-                index=0,
-                help="Detailed shows tabs; compact keeps cards denser.",
-            )
-        with control_cols[2]:
-            max_tags = st.slider(
-                "Maximum tag chips shown per recipe",
-                min_value=3,
-                max_value=12,
-                value=8,
-                help="Tag chips are visual only and do not affect ranking/filter behavior.",
-            )
-
         display_df = sort_results_for_display(results_df, sort_mode)
         tag_columns = infer_tag_columns(display_df)
+        show_feedback = st.session_state.get("feedback_query_vec") is not None
 
         has_proj = "x_proj" in display_df.columns
         if has_proj:
@@ -468,19 +828,12 @@ if isinstance(results_df, pd.DataFrame):
                 "to see where these land!"
             )
 
-        for rank, (_, row) in enumerate(display_df.iterrows(), start=1):
-            row_dict = row.to_dict()
-            row_dict["_active_tags"] = get_active_tags(
-                row_dict,
-                tag_columns,
-                max_tags=max_tags,
-            )
-            render_recipe_card(
-                row_dict,
-                rank=rank,
-                display_mode=display_mode,
-                on_add_to_shopping_list=_add_recipe_to_shopping_list,
-                widget_key_prefix=f"results_{search_mode or 'text'}",
-            )
+        _render_result_grid(
+            display_df,
+            tag_columns=tag_columns,
+            max_tags=max_tags,
+            search_mode=search_mode,
+            show_feedback=show_feedback,
+        )
 else:
     _render_landing_state()

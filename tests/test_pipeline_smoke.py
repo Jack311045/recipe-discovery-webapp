@@ -38,7 +38,7 @@ class _DummyModel:
     def __init__(self, dim: int = 24) -> None:
         self._dim = dim
 
-    def get_embedding_dimension(self) -> int:
+    def get_sentence_embedding_dimension(self) -> int:
         return self._dim
 
     def encode(

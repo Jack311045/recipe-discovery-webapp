@@ -84,6 +84,11 @@ def parse_steps(raw_value: object) -> list[str]:
     return _parse_serialized_list(raw_value, allow_comma_split=False)
 
 
+def parse_reviews(raw_value: object) -> list[str]:
+    """Parse review text into readable review entries."""
+    return _parse_serialized_list(raw_value, allow_comma_split=False)
+
+
 def _as_float(value: object) -> float | None:
     """Convert arbitrary values to float, returning None on failure."""
     try:
@@ -133,13 +138,13 @@ def _get_description(recipe: Mapping[str, object]) -> str:
 def _collect_nutrition_values(recipe: Mapping[str, object]) -> list[tuple[str, str]]:
     """Collect nutrition values if present in the result row."""
     spec = [
-        ("calories", "Calories", "kcal"),
         ("protein", "Protein", "g"),
         ("carbohydrates", "Carbs", "g"),
         ("total fat", "Total Fat", "g"),
         ("saturated fat", "Saturated Fat", "g"),
         ("sugar", "Sugar", "g"),
         ("sodium", "Sodium", "mg"),
+        ("calories", "Calories", "kcal"),
     ]
 
     values: list[tuple[str, str]] = []
@@ -211,17 +216,87 @@ def _render_steps_section(items: list[str]) -> None:
     st.caption("Preparation steps are unavailable for this recipe.")
 
 
+def _render_reviews_section(items: list[str]) -> None:
+    """Render review text with a centered empty state."""
+    if not items:
+        st.markdown(
+            """
+            <div class="menu-card-empty-reviews">No reviews</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    reviews = "".join(
+        "<article class='menu-card-review'>"
+        f"{html.escape(item)}"
+        "</article>"
+        for item in items
+    )
+    st.markdown(
+        f"""
+        <div class="menu-card-reviews">{reviews}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_nutrition_section(recipe: Mapping[str, object]) -> None:
-    """Render nutrition metrics only when available."""
+    """Render nutrition metrics as a flex grid without truncation."""
     nutrition_values = _collect_nutrition_values(recipe)
     if not nutrition_values:
         st.caption("Nutrition details are unavailable for this recipe.")
         return
 
-    cols = st.columns(min(4, len(nutrition_values)))
-    for idx, (label, value) in enumerate(nutrition_values):
-        with cols[idx % len(cols)]:
-            st.metric(label, value)
+    cells = "".join(
+        f"<div class='nutri-cell'>"
+        f"<span class='nutri-label'>{html.escape(label)}</span>"
+        f"<span class='nutri-value'>{html.escape(value)}</span>"
+        f"</div>"
+        for label, value in nutrition_values
+    )
+    st.markdown(
+        f"""
+        <style>
+        .nutri-grid {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            justify-content: space-between;
+            margin: 0.3rem 0;
+        }}
+        .nutri-cell {{
+            flex: 1 1 auto;
+            min-width: 5.5rem;
+            padding: 0.45rem 0.55rem;
+            border: 1px solid rgba(200, 179, 138, 0.8);
+            border-radius: 0.6rem;
+            background: rgba(255, 250, 241, 0.92);
+            text-align: center;
+        }}
+        .nutri-label {{
+            display: block;
+            font-size: 0.68rem;
+            color: #6c5848;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 0.15rem;
+            white-space: normal;
+            word-wrap: break-word;
+        }}
+        .nutri-value {{
+            display: block;
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: #3b2f2a;
+            white-space: normal;
+            word-wrap: break-word;
+        }}
+        </style>
+        <div class="nutri-grid">{cells}</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _build_food_com_url(recipe: Mapping[str, object]) -> str | None:
@@ -246,6 +321,8 @@ def render_recipe_card(
     *,
     display_mode: str = "Detailed",
     on_add_to_shopping_list: Callable[[Mapping[str, object]], None] | None = None,
+    on_negative_feedback: Callable[[str], None] | None = None,
+    feedback_key: str | None = None,
     widget_key_prefix: str = "search",
 ) -> None:
     """Render a recipe result card with compact or detailed layouts."""
@@ -258,22 +335,12 @@ def render_recipe_card(
     n_steps = _as_int(recipe.get("n_steps"))
     ingredient_items = parse_ingredients(recipe.get("ingredients"))
     step_items = parse_steps(recipe.get("steps"))
+    review_items = parse_reviews(recipe.get("all_reviews") or recipe.get("reviews"))
     compact = str(display_mode).strip().lower() == "compact"
 
     with st.container(border=True):
         image_text = str(image_url).strip() if image_url is not None else ""
-        if image_text and image_text.lower() not in {"none", "null", "nan"}:
-            st.image(str(image_url), width=260)
-
-        cols = st.columns([4, 1])
-        with cols[0]:
-            st.markdown(
-                f"<h3 class='menu-card-title'>{html.escape(heading_text)}</h3>",
-                unsafe_allow_html=True,
-            )
-        with cols[1]:
-            if score is not None:
-                st.metric("Match", f"{score:.2%}")
+        has_image = bool(image_text) and image_text.lower() not in {"none", "null", "nan"}
 
         meta_parts = []
         if minutes is not None:
@@ -282,33 +349,84 @@ def render_recipe_card(
             meta_parts.append(f"\U0001f9c2 {int(n_ingredients)} ingredients")
         if n_steps is not None:
             meta_parts.append(f"\U0001f4cb {int(n_steps)} steps")
-        if meta_parts:
-            escaped_meta = html.escape("  \u00b7  ".join(meta_parts))
+
+        signal_parts = [html.escape(part) for part in meta_parts]
+        if score is not None:
+            signal_parts.append(
+                "<span class='menu-match-inline'>"
+                f"Match {score:.2%}"
+                "</span>"
+            )
+
+        header_cols = st.columns([1.05, 2.2], gap="medium")
+        with header_cols[0]:
+            if has_image:
+                st.image(str(image_url), use_container_width=True)
+            else:
+                st.markdown(
+                    "<div class='menu-card-image-placeholder'>No image</div>",
+                    unsafe_allow_html=True,
+                )
+
+        with header_cols[1]:
             st.markdown(
-                f"<p class='menu-card-meta'>{escaped_meta}</p>",
+                f"<h3 class='menu-card-title'>{html.escape(heading_text)}</h3>",
                 unsafe_allow_html=True,
             )
+            if signal_parts:
+                st.markdown(
+                    "<p class='menu-card-signal-row'>"
+                    + "<span class='menu-card-meta-text'>"
+                    + " &middot; ".join(signal_parts)
+                    + "</span>"
+                    + "</p>",
+                    unsafe_allow_html=True,
+                )
         st.markdown("<div class='menu-card-divider'></div>", unsafe_allow_html=True)
 
         food_url = _build_food_com_url(recipe)
-        if food_url or on_add_to_shopping_list is not None:
-            num_actions = int(bool(food_url)) + int(on_add_to_shopping_list is not None)
+        recipe_id = recipe.get("recipe_id") or recipe.get("id")
+        show_feedback = (
+            on_negative_feedback is not None
+            and feedback_key is not None
+            and recipe_id is not None
+        )
+
+        # Count how many action buttons we have
+        num_actions = (
+            int(bool(food_url))
+            + int(on_add_to_shopping_list is not None)
+            + int(show_feedback)
+        )
+
+        if num_actions > 0:
             action_cols = st.columns(num_actions)
             col_idx = 0
             if food_url:
                 with action_cols[col_idx]:
-                    st.link_button("Open on Food.com", food_url)
+                    st.link_button("Website", food_url, use_container_width=True)
                 col_idx += 1
             if on_add_to_shopping_list is not None:
                 with action_cols[col_idx]:
                     suffix = _build_recipe_widget_suffix(recipe, rank)
                     add_clicked = st.button(
-                        "Add to shopping list",
+                        "🛒 Add to cart",
                         key=f"{widget_key_prefix}_add_to_list_{suffix}",
                         use_container_width=True,
                     )
                     if add_clicked:
                         on_add_to_shopping_list(recipe)
+                col_idx += 1
+            if show_feedback:
+                with action_cols[col_idx]:
+                    if st.button(
+                        "✕ Not relevant",
+                        key=feedback_key,
+                        use_container_width=True,
+                        help="Remove this result and adjust recommendations.",
+                    ):
+                        on_negative_feedback(str(recipe_id))
+                        st.rerun()
 
         if compact:
             _render_overview(
@@ -323,7 +441,7 @@ def render_recipe_card(
                 _render_steps_section(step_items)
             return
 
-        tabs = st.tabs(["Overview", "Nutrition", "Ingredients", "Steps"])
+        tabs = st.tabs(["Overview", "Nutrition", "Ingredients", "Steps", "Reviews"])
         with tabs[0]:
             _render_overview(
                 recipe,
@@ -337,3 +455,5 @@ def render_recipe_card(
             _render_ingredients_section(ingredient_items)
         with tabs[3]:
             _render_steps_section(step_items)
+        with tabs[4]:
+            _render_reviews_section(review_items)

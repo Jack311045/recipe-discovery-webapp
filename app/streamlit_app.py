@@ -1,42 +1,27 @@
-"""Main Streamlit entrypoint for the recipe discovery app."""
+"""Main Streamlit entrypoint and page router for the recipe discovery app."""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import streamlit as st
 
-from app.components.theme import apply_restaurant_menu_theme
-from recipe_discovery.settings import get_app_title
+ROOT = Path(__file__).resolve().parent.parent
+APP_DIR = ROOT / "app"
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 
 def main() -> None:
-    st.set_page_config(page_title=get_app_title(), layout="wide")
-    apply_restaurant_menu_theme()
-
-    st.markdown("<p class='menu-script-accent'>Chef's Selection</p>", unsafe_allow_html=True)
-    st.title(get_app_title())
-    st.markdown(
-        "Semantic recipe retrieval, clustering, ranking, and 2D visualization."
-    )
-
-    with st.container(border=True):
-        st.subheader("Checkpoint status")
-        st.write(
-            "This app is currently a professional scaffold. The UI pages, module "
-            "boundaries, and training scripts are in place so the repo is runnable "
-            "and ready for implementation."
-        )
-
-    st.markdown(
-        """
-        ### Included modules
-        - Embedding generation
-        - Nearest-neighbor retrieval with cosine similarity
-        - K-means clustering
-        - Regression ranking
-        - PCA and autoencoder projection
-        - Evaluation utilities
-        """
-    )
+    pages = [
+        st.Page(APP_DIR / "pages" / "1_Search.py", title="Search", default=True),
+        st.Page(APP_DIR / "pages" / "5_Shopping_List.py", title="Shopping List"),
+        st.Page(APP_DIR / "pages" / "2_Explore_Clusters.py", title="Explore Clusters"),
+        st.Page(APP_DIR / "pages" / "3_Embedding_Map.py", title="Embedding Map"),
+        st.Page(APP_DIR / "pages" / "4_Model_Diagnostics.py", title="Model Diagnostics"),
+    ]
+    st.navigation(pages).run()
 
 
 if __name__ == "__main__":

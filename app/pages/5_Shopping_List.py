@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
+from app.components.search_state import SEARCH_STATE_QUERY_PARAM, restore_search_snapshot
+from app.components.theme import apply_restaurant_menu_theme
 from app.components.shopping_list import (
     add_manual_item_to_shopping_list,
     clear_shopping_list,
@@ -25,6 +27,7 @@ from app.components.shopping_list import (
 )
 
 st.set_page_config(page_title="Shopping List", layout="wide")
+apply_restaurant_menu_theme()
 
 
 def _item_widget_suffix(normalized_name: str) -> str:
@@ -58,12 +61,56 @@ def _clear_one_checkbox_widget_state(normalized_name: str) -> None:
     st.session_state.pop(f"shopping_checked_{suffix}", None)
 
 
+def _get_search_state_query_token() -> str:
+    """Read the cached search-state token from Streamlit query params."""
+    return _get_query_param(SEARCH_STATE_QUERY_PARAM)
+
+
+def _get_query_param(name: str) -> str:
+    """Read a single query parameter across Streamlit versions."""
+    if hasattr(st, "query_params"):
+        raw_value = st.query_params.get(name, "")
+        if isinstance(raw_value, list):
+            return str(raw_value[0]) if raw_value else ""
+        return str(raw_value or "")
+
+    get_query_params = getattr(st, "experimental_get_query_params", None)
+    if get_query_params is None:
+        return ""
+
+    raw_value = get_query_params().get(name, [])
+    if isinstance(raw_value, list):
+        return str(raw_value[0]) if raw_value else ""
+    return str(raw_value or "")
+
+
 ensure_shopping_list_state()
+search_state_token = _get_search_state_query_token()
+if search_state_token:
+    restore_search_snapshot(search_state_token, st.session_state)
 
 st.title("Shopping List")
 st.caption(
     "Collect ingredients from recipe cards, check off items as you shop, and add manual items when needed."
 )
+
+shopping_list_notice = st.session_state.pop("shopping_list_notice", None)
+if shopping_list_notice:
+    st.success(shopping_list_notice)
+
+with st.form("shopping_manual_add_form", clear_on_submit=True):
+    manual_item = st.text_input(
+        "Add an item manually",
+        placeholder="e.g., olive oil",
+    )
+    manual_submitted = st.form_submit_button("Add item")
+
+if manual_submitted:
+    if add_manual_item_to_shopping_list(manual_item):
+        st.session_state["shopping_list_notice"] = "Added item to shopping list."
+        st.rerun()
+    else:
+        st.warning("Enter a valid item name to add.")
 
 total_items = get_shopping_list_count()
 checked_items = get_checked_item_count()
@@ -100,19 +147,6 @@ if clear_all_clicked:
     _clear_checkbox_widget_state()
     st.success("Cleared the shopping list.")
     st.rerun()
-
-with st.form("shopping_manual_add_form", clear_on_submit=True):
-    manual_item = st.text_input(
-        "Add an item manually",
-        placeholder="e.g., olive oil",
-    )
-    manual_submitted = st.form_submit_button("Add item")
-
-if manual_submitted:
-    if add_manual_item_to_shopping_list(manual_item):
-        st.success("Added item to shopping list.")
-    else:
-        st.warning("Enter a valid item name to add.")
 
 if get_shopping_list_count() == 0:
     st.info("Your shopping list is empty. Add ingredients from search results or type an item above.")

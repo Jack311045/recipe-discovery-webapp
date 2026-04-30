@@ -28,6 +28,7 @@ import pandas as pd
 import streamlit as st
 
 from app.components.plots import scatter_2d_with_highlights
+from app.components.theme import apply_restaurant_menu_theme
 from app.service_loader import get_retrieval_service
 from recipe_discovery.clustering.kmeans import KMeans
 from recipe_discovery.clustering.labels import name_clusters
@@ -35,6 +36,7 @@ from recipe_discovery.retrieval.service import RetrievalRequest
 from recipe_discovery.settings import ARTIFACTS_DIR
 
 st.set_page_config(page_title="Embedding Map", layout="wide")
+apply_restaurant_menu_theme()
 st.title("🗺️ Embedding Map")
 st.caption(
     "Each point is a recipe projected into 2D using your dimensionality reduction module. "

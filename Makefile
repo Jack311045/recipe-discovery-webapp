@@ -10,6 +10,7 @@ test:
 	pytest
 
 run-app:
+	python3 scripts/patch_streamlit_connection_message.py
 	streamlit run app/streamlit_app.py
 
 fetch-artifacts:
