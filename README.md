@@ -16,18 +16,6 @@ Given a natural-language food request and optional dietary constraints, return t
 - Optional classification module for recipe tag prediction
 - Explicit train / validation / test support and k-fold hooks for evaluation
 
-## What counts as a “working environment”
-
-For the checkpoint, a working environment usually means:
-
-1. A teammate or TA can clone the repo.
-2. They can create a virtual environment.
-3. They can install the dependencies from `requirements.txt`.
-4. They can run the app entrypoint without import errors or missing-file crashes.
-5. The repo already contains the module stubs described in the design document, even if the models are still placeholders.
-
-That does **not** mean the final ML system has to be fully trained yet. It means the project is organized, runnable, and ready for implementation.
-
 ## Quick start
 
 ### 1) Create a virtual environment
@@ -49,22 +37,11 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3) Add processed data + artifacts (required)
+### 3) Fetch processed data + artifacts (required)
 The app expects a processed CSV plus embedding artifacts. These are stored
 outside of Git due to size.
 
-#### 3a) Add processed CSV
-Place the processed file at:
-- `data/processed/Processed_data_updated2.csv`
-
-If you already have a local `Processed_data_updated2.csv`, move it into
-`data/processed/`.
-
-#### 3b) Fetch embedding artifacts (Google Drive)
-Download the shared artifacts into `data/artifacts/`:
-
 ```bash
-pip install -r requirements.txt
 python scripts/fetch_gdrive_artifacts.py --folder "https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
 ```
 
@@ -103,5 +80,5 @@ streamlit run app/streamlit_app.py
 4. Run cosine retrieval for user queries
 5. Fit k-means clusters for exploration
 6. Fit regression ranking signal
-7. Produce 2D projection with PCA or autoencoder
+7. Produce 2D projection with PCA
 8. Surface everything in Streamlit
