@@ -79,28 +79,6 @@ If you want to rebuild the processed CSV, you will need the Kaggle raw files:
 - `data/raw/RAW_recipes.csv`
 - `data/raw/RAW_interactions.csv`
 
-### 3b) Fetch embedding artifacts (Google Drive)
-This repo keeps large embedding artifacts out of Git. To pull them from Google Drive:
-
-1) Upload everything from `data/artifacts/` to a shared Google Drive folder.
-2) Set the folder sharing to "Anyone with the link" (Viewer).
-3) Copy the folder link or ID.
-4) Download the artifacts locally:
-
-```bash
-pip install -r requirements.txt
-python scripts/fetch_gdrive_artifacts.py --folder "https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
-```
-
-You can also set it once and reuse it:
-```bash
-export GDRIVE_ARTIFACTS_FOLDER="https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
-python scripts/fetch_gdrive_artifacts.py
-```
-
-The current preprocessing script is minimal and does not persist outputs.
-Rebuilding is not required for running the app.
-
 ### 4) Run the app
 ```bash
 streamlit run app/streamlit_app.py
@@ -127,11 +105,3 @@ streamlit run app/streamlit_app.py
 6. Fit regression ranking signal
 7. Produce 2D projection with PCA or autoencoder
 8. Surface everything in Streamlit
-
-## Current status
-
-This repository is a professional scaffold for the checkpoint:
-- directory structure is in place
-- imports are organized
-- module stubs exist for all major methods
-- app can run as a placeholder UI
