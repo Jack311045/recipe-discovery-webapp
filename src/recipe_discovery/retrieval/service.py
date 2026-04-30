@@ -30,6 +30,11 @@ from recipe_discovery.embeddings.encoder import EmbeddingConfig, RecipeEncoder
 from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.filters import apply_basic_filters
+from recipe_discovery.retrieval.intent import (
+    QueryIntent,
+    rerank_candidates_with_intent,
+    understand_query_intent,
+)
 from recipe_discovery.retrieval.image_fetcher import attach_foodcom_images
 from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
@@ -45,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 _SMALL_ARTIFACT_WARN_THRESHOLD = 5000
 _EXACT_TAG_SCORE_BOOST = 1.0
+_TEXT_CANDIDATE_MULTIPLIER = 30
 
 
 @dataclass
@@ -134,6 +140,91 @@ class RetrievalService:
             if candidate in normalized_to_col:
                 return normalized_to_col[candidate]
         return None
+
+    def _build_query_intent(self, query: str) -> QueryIntent:
+        """Parse raw query text into deterministic recipe-domain intent signals."""
+        available_tags = self.one_hot_tag_columns
+        if not available_tags and self.metadata is not None:
+            available_tags = get_one_hot_tag_columns(self.metadata)
+
+        return understand_query_intent(
+            query,
+            available_tags=available_tags,
+        )
+
+    def _encode_intent_aware_text_query(
+        self,
+        query: str,
+        *,
+        intent: QueryIntent,
+    ) -> np.ndarray:
+        """Blend raw and rewritten query vectors to improve intent alignment."""
+        if self.encoder is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+
+        raw_encoded = self.encoder.encode([query], show_progress=False)
+        raw_vec = np.asarray(raw_encoded, dtype=float)[0]
+
+        rewritten = intent.rewritten_query.strip()
+        if rewritten and rewritten.lower() != query.strip().lower():
+            rewritten_encoded = self.encoder.encode([rewritten], show_progress=False)
+            rewritten_vec = np.asarray(rewritten_encoded, dtype=float)[0]
+            # Short and ambiguous queries benefit from a stronger rewrite blend.
+            rewrite_weight = 0.4 if len(intent.query_terms) <= 3 else 0.28
+            query_vec = (1.0 - rewrite_weight) * raw_vec + rewrite_weight * rewritten_vec
+        else:
+            query_vec = raw_vec
+
+        norm = np.linalg.norm(query_vec)
+        if norm > 0:
+            query_vec = query_vec / norm
+        return query_vec
+
+    def _rank_candidates_with_intent(
+        self,
+        candidates: pd.DataFrame,
+        *,
+        query_text: str,
+        intent: QueryIntent | None,
+        base_score_column: str = "similarity_score",
+    ) -> pd.DataFrame:
+        """Apply exact-tag boost then intent-aware reranking on filtered candidates."""
+        if candidates.empty:
+            return candidates
+
+        ranked = candidates.copy()
+        ranking_base_column = base_score_column
+
+        matched_tag_col = self._resolve_query_tag_column(query_text, ranked)
+        if matched_tag_col and matched_tag_col in ranked.columns:
+            ranked["query_tag_match"] = (
+                pd.to_numeric(ranked[matched_tag_col], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .eq(1)
+                .astype(int)
+            )
+            ranked["matched_query_tag"] = matched_tag_col
+            boosted_column = (
+                "boosted_similarity_score"
+                if base_score_column == "similarity_score"
+                else f"boosted_{base_score_column}"
+            )
+            ranked[boosted_column] = (
+                ranked[base_score_column]
+                + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
+            )
+            ranking_base_column = boosted_column
+
+        if intent is None and query_text.strip():
+            intent = self._build_query_intent(query_text)
+
+        return rerank_candidates_with_intent(
+            ranked,
+            intent=intent,
+            one_hot_tag_columns=self.one_hot_tag_columns,
+            base_score_column=ranking_base_column,
+        )
 
     def _get_encoder_config(self) -> EmbeddingConfig:
         """Build encoder config, preferring saved embedding metadata when present."""
@@ -498,6 +589,8 @@ class RetrievalService:
         query_vec: np.ndarray,
         embeddings: np.ndarray,
         limit_to_top_k: bool,
+        intent: QueryIntent | None = None,
+        query_text: str | None = None,
     ) -> pd.DataFrame:
         """Return filtered candidate matches for a query vector."""
         if self.metadata is None:
@@ -508,7 +601,10 @@ class RetrievalService:
 
         scores = cosine_similarity(query=query_vec, matrix=embeddings)
 
-        candidate_pool = min(len(scores), max(request.top_k * 10, request.top_k))
+        candidate_pool = min(
+            len(scores),
+            max(request.top_k * _TEXT_CANDIDATE_MULTIPLIER, request.top_k),
+        )
         if candidate_pool == 0:
             return self.metadata.iloc[0:0].assign(similarity_score=pd.Series(dtype=float))
 
@@ -536,28 +632,13 @@ class RetrievalService:
         if filtered.empty:
             return filtered
 
-        query_text = request.query or ""
-        matched_tag_col = self._resolve_query_tag_column(query_text, filtered)
-        if matched_tag_col and matched_tag_col in filtered.columns:
-            ranked = filtered.copy()
-            ranked["query_tag_match"] = (
-                pd.to_numeric(ranked[matched_tag_col], errors="coerce")
-                .fillna(0)
-                .astype(int)
-                .eq(1)
-                .astype(int)
-            )
-            ranked["matched_query_tag"] = matched_tag_col
-            ranked["boosted_similarity_score"] = (
-                ranked["similarity_score"]
-                + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
-            )
-            ranked = ranked.sort_values(
-                ["boosted_similarity_score", "similarity_score"],
-                ascending=False,
-            )
-        else:
-            ranked = filtered.sort_values("similarity_score", ascending=False)
+        active_query_text = query_text if query_text is not None else (request.query or "")
+        ranked = self._rank_candidates_with_intent(
+            filtered,
+            query_text=active_query_text,
+            intent=intent,
+            base_score_column="similarity_score",
+        )
 
         if limit_to_top_k:
             ranked = ranked.head(request.top_k)
@@ -577,13 +658,16 @@ class RetrievalService:
         if not request.query or not request.query.strip():
             raise ValueError("Search query is required for text search.")
 
-        encoded = self.encoder.encode([request.query], show_progress=False)
-        query_vec = np.asarray(encoded)[0]
+        query_text = request.query.strip()
+        intent = self._build_query_intent(query_text)
+        query_vec = self._encode_intent_aware_text_query(query_text, intent=intent)
         return self._search_candidates_for_vector(
             request,
             query_vec=query_vec,
             embeddings=self.embeddings,
             limit_to_top_k=limit_to_top_k,
+            intent=intent,
+            query_text=query_text,
         )
 
     def encode_text_query(self, query: str) -> np.ndarray:
@@ -593,12 +677,9 @@ class RetrievalService:
         if not query or not query.strip():
             raise ValueError("Search query is required for text feedback.")
 
-        encoded = self.encoder.encode([query], show_progress=False)
-        vec = np.asarray(encoded, dtype=float)[0]
-        norm = np.linalg.norm(vec)
-        if norm == 0:
-            return vec
-        return vec / norm
+        query_text = query.strip()
+        intent = self._build_query_intent(query_text)
+        return self._encode_intent_aware_text_query(query_text, intent=intent)
 
     def encode_image_query(self, image: Image.Image) -> np.ndarray:
         """Encode an uploaded image into the loaded SigLIP embedding space."""
@@ -646,12 +727,16 @@ class RetrievalService:
             for recipe_id in negative_recipe_ids
             if str(recipe_id).strip()
         }
+        query_text = (request.query or "").strip()
+        intent = self._build_query_intent(query_text) if query_text else None
         if not excluded:
             results = self._search_candidates_for_vector(
                 request,
                 query_vec=np.asarray(query_vec, dtype=float),
                 embeddings=embeddings,
                 limit_to_top_k=True,
+                intent=intent,
+                query_text=query_text,
             )
             return self._attach_foodcom_images(results)
 
@@ -666,6 +751,8 @@ class RetrievalService:
                 query_vec=np.asarray(query_vec, dtype=float),
                 embeddings=embeddings,
                 limit_to_top_k=True,
+                intent=intent,
+                query_text=query_text,
             )
             return self._attach_foodcom_images(results)
 
@@ -693,6 +780,8 @@ class RetrievalService:
             query_vec=adjusted,
             embeddings=embeddings,
             limit_to_top_k=False,
+            intent=intent,
+            query_text=query_text,
         )
 
         if not candidates.empty:
@@ -855,6 +944,12 @@ class RetrievalService:
         if filtered.empty:
             return filtered
 
-        ranked = filtered.sort_values("similarity_score", ascending=False)
+        intent = self._build_query_intent(text)
+        ranked = self._rank_candidates_with_intent(
+            filtered,
+            query_text=text,
+            intent=intent,
+            base_score_column="similarity_score",
+        )
         results = ranked.head(request.top_k).reset_index(drop=True)
         return self._attach_foodcom_images(results)
