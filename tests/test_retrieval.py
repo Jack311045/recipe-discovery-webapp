@@ -68,6 +68,8 @@ def toy_service() -> RetrievalService:
             "name": ["A", "B", "C", "D", "E"],
             "minutes": [10, 20, 25, 35, 50],
             "n_ingredients": [8, 4, 5, 3, 2],
+            "calories": [550, 240, 320, 190, 120],
+            "protein": [12, 18, 24, 31, 6],
             "vegetarian": [0, 0, 1, 1, 0],
             "vegan": [0, 0, 0, 1, 1],
             "gluten-free": [0, 0, 1, 0, 1],
@@ -356,6 +358,24 @@ def test_max_ingredients_filter_works(toy_service: RetrievalService) -> None:
     assert (result["n_ingredients"] <= 4).all()
 
 
+def test_max_calories_filter_works(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(query="quick dinner", top_k=5, max_calories=250)
+    )
+
+    assert not result.empty
+    assert (result["calories"] <= 250).all()
+
+
+def test_min_protein_filter_works(toy_service: RetrievalService) -> None:
+    result = toy_service.search(
+        RetrievalRequest(query="quick dinner", top_k=5, min_protein=20)
+    )
+
+    assert not result.empty
+    assert (result["protein"] >= 20).all()
+
+
 def test_empty_result_cases_do_not_crash(toy_service: RetrievalService) -> None:
     result = toy_service.search(
         RetrievalRequest(
@@ -436,6 +456,75 @@ def test_combined_search_uses_text_to_refine_image_candidates() -> None:
     assert result.iloc[0]["name"] != "generic rice dish"
     assert "image_similarity_score" in result.columns
     assert "text_similarity_score" in result.columns
+
+
+def test_image_search_respects_calories_and_min_protein_filters() -> None:
+    service = RetrievalService()
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["10", "20", "30"],
+            "name": ["A", "B", "C"],
+            "minutes": [20, 20, 20],
+            "n_ingredients": [5, 5, 5],
+            "calories": [700, 320, 260],
+            "protein": [12, 28, 18],
+        }
+    )
+    service._siglip_embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.98, 0.02],
+        ],
+        dtype=float,
+    )
+    service._encode_image = lambda image: np.array([1.0, 0.0], dtype=float)  # type: ignore[method-assign]
+    service._attach_foodcom_images = lambda df: df  # type: ignore[method-assign]
+
+    result = service.search_by_image(
+        Image.new("RGB", (1, 1)),
+        RetrievalRequest(query="", top_k=3, max_calories=400, min_protein=20),
+    )
+
+    assert not result.empty
+    assert (result["calories"] <= 400).all()
+    assert (result["protein"] >= 20).all()
+
+
+def test_combined_search_respects_calories_and_min_protein_filters() -> None:
+    service = RetrievalService()
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2", "3"],
+            "name": ["A", "B", "C"],
+            "minutes": [20, 20, 20],
+            "n_ingredients": [6, 6, 6],
+            "calories": [820, 340, 280],
+            "protein": [11, 26, 18],
+        }
+    )
+    service._siglip_embeddings = np.array(
+        [
+            [1.0, 0.0],
+            [0.95, 0.05],
+            [0.9, 0.1],
+        ],
+        dtype=float,
+    )
+    service._encode_image = lambda image: np.array([1.0, 0.0], dtype=float)  # type: ignore[method-assign]
+    service._encode_siglip_text = lambda text: np.array([1.0, 0.0], dtype=float)  # type: ignore[method-assign]
+    service._attach_foodcom_images = lambda df: df  # type: ignore[method-assign]
+
+    result = service.search_combined(
+        "quick bowl",
+        Image.new("RGB", (1, 1)),
+        RetrievalRequest(query="quick bowl", top_k=3, max_calories=400, min_protein=20),
+        alpha=0.5,
+    )
+
+    assert not result.empty
+    assert (result["calories"] <= 400).all()
+    assert (result["protein"] >= 20).all()
 
 
 def test_search_with_optional_rerank_falls_back_to_similarity_only(

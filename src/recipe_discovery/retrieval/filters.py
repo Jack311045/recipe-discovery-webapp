@@ -86,10 +86,13 @@ def _apply_ingredient_filter(df: pd.DataFrame, max_ingredients: int) -> pd.DataF
     return df
 
 def _apply_calories_filter(df: pd.DataFrame, max_calories: int) -> pd.DataFrame:
-    """Filter by total fat using numeric field."""
+    """Filter by calories using numeric field.
+
+    Rows with missing calories are excluded when the filter is active.
+    """
     if "calories" in df.columns:
         calories_values = pd.to_numeric(df["calories"], errors="coerce")
-        return df.loc[calories_values <= max_calories]
+        return df.loc[calories_values.notna() & (calories_values <= max_calories)]
     return df
 
 def _apply_fat_filter(df: pd.DataFrame, max_fat: int) -> pd.DataFrame:
@@ -114,10 +117,24 @@ def _apply_sodium_filter(df: pd.DataFrame, max_sodium: int) -> pd.DataFrame:
     return df
 
 def _apply_protein_filter(df: pd.DataFrame, max_protein: int) -> pd.DataFrame:
-    """Filter by total protein using numeric field."""
+    """Filter by maximum protein using numeric field.
+
+    Rows with missing protein are excluded when the filter is active.
+    """
     if "protein" in df.columns:
         protein_values = pd.to_numeric(df["protein"], errors="coerce")
-        return df.loc[protein_values <= max_protein]
+        return df.loc[protein_values.notna() & (protein_values <= max_protein)]
+    return df
+
+
+def _apply_min_protein_filter(df: pd.DataFrame, min_protein: int) -> pd.DataFrame:
+    """Filter by minimum protein using numeric field.
+
+    Rows with missing protein are excluded when the filter is active.
+    """
+    if "protein" in df.columns:
+        protein_values = pd.to_numeric(df["protein"], errors="coerce")
+        return df.loc[protein_values.notna() & (protein_values >= min_protein)]
     return df
 
 def _apply_saturated_fat_filter(df: pd.DataFrame, max_saturated_fat: int) -> pd.DataFrame:
@@ -153,6 +170,7 @@ def apply_basic_filters(
     max_sugar: int | None = None,
     max_sodium: int | None = None,
     max_protein: int | None = None,
+    min_protein: int | None = None,
     max_saturated_fat: int | None = None,
     max_carbohydrates: int | None = None,
     min_rating: float | None = None,
@@ -180,6 +198,9 @@ def apply_basic_filters(
 
     if max_protein is not None:
         result = _apply_protein_filter(result, max_protein)
+
+    if min_protein is not None:
+        result = _apply_min_protein_filter(result, min_protein)
 
     if max_saturated_fat is not None:
         result = _apply_saturated_fat_filter(result, max_saturated_fat)

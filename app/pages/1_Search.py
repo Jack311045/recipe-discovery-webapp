@@ -525,6 +525,28 @@ with st.sidebar:
             step=1,
         )
 
+    use_calories_requirement = st.checkbox("Apply calories requirement", value=False)
+    max_calories = None
+    if use_calories_requirement:
+        max_calories = st.slider(
+            "Maximum calories",
+            min_value=50,
+            max_value=2000,
+            value=700,
+            step=25,
+        )
+
+    use_protein_requirement = st.checkbox("Apply protein requirement", value=False)
+    min_protein = None
+    if use_protein_requirement:
+        min_protein = st.slider(
+            "Minimum protein (g)",
+            min_value=0,
+            max_value=100,
+            value=20,
+            step=1,
+        )
+
     top_k = st.slider("Number of results", min_value=3, max_value=20, value=8)
     alpha = st.slider(
         "Image vs text weight (combined search)",
@@ -619,6 +641,8 @@ if run_search:
         dietary_filter=diet_options[diet_label],
         max_time_minutes=max_time,
         max_ingredients=max_ingredients,
+        max_calories=max_calories,
+        min_protein=min_protein,
     )
     has_query = bool(query.strip())
     has_image = uploaded_file is not None

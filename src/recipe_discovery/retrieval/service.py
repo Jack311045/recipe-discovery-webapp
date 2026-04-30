@@ -61,6 +61,7 @@ class RetrievalRequest:
     max_sugar: int | None = None
     max_sodium: int | None = None
     max_protein: int | None = None
+    min_protein: int | None = None
     max_saturated_fat: int | None = None
     max_carbohydrates: int | None = None
     min_rating: float | None = None
@@ -528,6 +529,7 @@ class RetrievalService:
             max_sugar=request.max_sugar,
             max_sodium=request.max_sodium,
             max_protein=request.max_protein,
+            min_protein=request.min_protein,
             max_saturated_fat=request.max_saturated_fat,
             max_carbohydrates=request.max_carbohydrates,
             min_rating=request.min_rating,
@@ -850,6 +852,15 @@ class RetrievalService:
             dietary_filter=request.dietary_filter,
             max_time_minutes=request.max_time_minutes,
             max_ingredients=request.max_ingredients,
+            max_calories=request.max_calories,
+            max_fat=request.max_fat,
+            max_sugar=request.max_sugar,
+            max_sodium=request.max_sodium,
+            max_protein=request.max_protein,
+            min_protein=request.min_protein,
+            max_saturated_fat=request.max_saturated_fat,
+            max_carbohydrates=request.max_carbohydrates,
+            min_rating=request.min_rating,
         )
 
         if filtered.empty:
