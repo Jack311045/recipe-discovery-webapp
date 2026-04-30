@@ -28,6 +28,43 @@ from app.components.shopping_list import (
 
 st.set_page_config(page_title="Shopping List", layout="wide")
 apply_restaurant_menu_theme()
+st.markdown(
+    """
+    <style>
+    .shopping-input-note {
+        margin: 0.15rem 0 0.6rem 0;
+        font-size: 1rem;
+        color: #5b483c;
+    }
+    .shopping-section-heading {
+        margin: 0.85rem 0 0.35rem 0;
+        font-size: 1.3rem;
+        color: #5b4434;
+        font-family: "Cormorant Garamond", "Playfair Display", serif;
+    }
+    .shopping-empty-state {
+        margin-top: 0.55rem;
+        padding: 0.9rem 1rem;
+        border: 1px dashed rgba(183, 159, 115, 0.9);
+        border-radius: 0.75rem;
+        background: rgba(255, 252, 245, 0.92);
+        color: #5a473b;
+        font-size: 1.02rem;
+        line-height: 1.5;
+    }
+    div[data-testid="stCheckbox"] label p {
+        font-size: 1.05rem !important;
+        line-height: 1.45 !important;
+        color: #3f322c !important;
+    }
+    .shopping-source-caption {
+        font-size: 0.95rem;
+        color: #665244;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def _item_widget_suffix(normalized_name: str) -> str:
@@ -89,19 +126,31 @@ search_state_token = _get_search_state_query_token()
 if search_state_token:
     restore_search_snapshot(search_state_token, st.session_state)
 
-st.title("Shopping List")
-st.caption(
-    "Collect ingredients from recipe cards, check off items as you shop, and add manual items when needed."
+st.markdown(
+    """
+    <section class="menu-page-header">
+      <p class="menu-page-kicker">Mise en Place</p>
+      <h1 class="menu-page-title">Shopping List</h1>
+      <p class="menu-page-subtitle">Collect ingredients from recipe cards, check off items while shopping, and add anything missing manually.</p>
+    </section>
+    """,
+    unsafe_allow_html=True,
 )
 
 shopping_list_notice = st.session_state.pop("shopping_list_notice", None)
 if shopping_list_notice:
     st.success(shopping_list_notice)
 
+st.markdown(
+    "<p class='shopping-input-note'>Add ingredients manually when they are not already pulled from recipe cards.</p>",
+    unsafe_allow_html=True,
+)
+
 with st.form("shopping_manual_add_form", clear_on_submit=True):
     manual_item = st.text_input(
-        "Add an item manually",
-        placeholder="e.g., olive oil",
+        "Add a manual shopping item",
+        placeholder="e.g., fresh basil, olive oil, chicken thighs, jasmine rice",
+        help="Type a single ingredient or grocery item. It will merge with existing duplicates automatically.",
     )
     manual_submitted = st.form_submit_button("Add item")
 
@@ -149,7 +198,10 @@ if clear_all_clicked:
     st.rerun()
 
 if get_shopping_list_count() == 0:
-    st.info("Your shopping list is empty. Add ingredients from search results or type an item above.")
+    st.markdown(
+        "<div class='shopping-empty-state'>Your shopping list is empty. Add ingredients from search results or enter an item above to get started.</div>",
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 group_by_category = st.toggle("Group by category", value=True)
@@ -157,7 +209,7 @@ grouped_items = get_grouped_shopping_items(group_by_category=group_by_category)
 
 for section_label, items in grouped_items.items():
     if group_by_category:
-        st.markdown(f"### {section_label}")
+        st.markdown(f"<h3 class='shopping-section-heading'>{section_label}</h3>", unsafe_allow_html=True)
 
     for item in items:
         normalized_name = str(item.get("normalized_name", "")).strip()
@@ -181,7 +233,10 @@ for section_label, items in grouped_items.items():
         with row_cols[1]:
             source_caption = _format_sources(item.get("source_recipes"))
             if source_caption:
-                st.caption(f"From: {source_caption}")
+                st.markdown(
+                    f"<p class='shopping-source-caption'>From: {source_caption}</p>",
+                    unsafe_allow_html=True,
+                )
 
         with row_cols[2]:
             remove_clicked = st.button(

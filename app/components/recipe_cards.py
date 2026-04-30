@@ -171,10 +171,13 @@ def _render_overview(
     """Render overview content shared across card modes."""
     description = _get_description(recipe)
     if description:
+        body_text = description
         if len(description) > clip_description:
-            st.write(f"{description[:clip_description]}…")
-        else:
-            st.write(description)
+            body_text = f"{description[:clip_description]}…"
+        st.markdown(
+            f"<p class='menu-card-description'>{html.escape(body_text)}</p>",
+            unsafe_allow_html=True,
+        )
 
     rating = _as_float(recipe.get("rating"))
     ratings_count = _as_int(recipe.get("num_ratings"))
@@ -188,7 +191,10 @@ def _render_overview(
     if step_items:
         overview_bits.append(f"📋 {len(step_items)} parsed steps")
     if overview_bits:
-        st.caption("  ·  ".join(overview_bits))
+        st.markdown(
+            f"<p class='menu-card-overview-meta'>{html.escape('  ·  '.join(overview_bits))}</p>",
+            unsafe_allow_html=True,
+        )
 
     active_tags = recipe.get("_active_tags")
     if isinstance(active_tags, list) and active_tags:
@@ -267,8 +273,8 @@ def _render_nutrition_section(recipe: Mapping[str, object]) -> None:
         }}
         .nutri-cell {{
             flex: 1 1 auto;
-            min-width: 5.5rem;
-            padding: 0.45rem 0.55rem;
+            min-width: 6.2rem;
+            padding: 0.55rem 0.65rem;
             border: 1px solid rgba(200, 179, 138, 0.8);
             border-radius: 0.6rem;
             background: rgba(255, 250, 241, 0.92);
@@ -276,7 +282,7 @@ def _render_nutrition_section(recipe: Mapping[str, object]) -> None:
         }}
         .nutri-label {{
             display: block;
-            font-size: 0.68rem;
+            font-size: 0.8rem;
             color: #6c5848;
             text-transform: uppercase;
             letter-spacing: 0.04em;
@@ -286,7 +292,7 @@ def _render_nutrition_section(recipe: Mapping[str, object]) -> None:
         }}
         .nutri-value {{
             display: block;
-            font-size: 0.92rem;
+            font-size: 1.05rem;
             font-weight: 700;
             color: #3b2f2a;
             white-space: normal;
@@ -410,7 +416,7 @@ def render_recipe_card(
                 with action_cols[col_idx]:
                     suffix = _build_recipe_widget_suffix(recipe, rank)
                     add_clicked = st.button(
-                        "🛒 Add to cart",
+                        "Add to shopping list",
                         key=f"{widget_key_prefix}_add_to_list_{suffix}",
                         use_container_width=True,
                     )

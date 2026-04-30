@@ -10,6 +10,8 @@ def apply_restaurant_menu_theme() -> None:
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Allura&family=Cormorant+Garamond:wght@400;500;600;700&family=Lora:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap');
+
         :root {
             --menu-bg: #F6EFD9;
             --menu-bg-soft: #FFF9EF;
@@ -66,20 +68,8 @@ def apply_restaurant_menu_theme() -> None:
         .stApp textarea {
             font-family: "Lora", "Merriweather", serif;
             color: var(--menu-text);
-        }
-
-        .material-icons,
-        .material-icons-outlined,
-        .material-icons-round,
-        .material-icons-sharp,
-        .material-symbols-outlined,
-        .material-symbols-rounded,
-        .material-symbols-sharp,
-        [class^="material-icons"],
-        [class*=" material-icons"],
-        [class^="material-symbols"],
-        [class*=" material-symbols"] {
-            display: none !important;
+            font-size: 1.02rem;
+            line-height: 1.52;
         }
 
         [data-testid="stSidebar"] {
@@ -97,15 +87,7 @@ def apply_restaurant_menu_theme() -> None:
         [data-testid="stSidebar"] h3,
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
             color: #5f4937;
-        }
-
-        [data-testid="stSidebarCollapseButton"] button,
-        [data-testid="stSidebarCollapsedControl"] button,
-        [data-testid="collapsedControl"] button,
-        button[data-testid="stSidebarCollapseButton"],
-        button[data-testid="stSidebarCollapsedControl"],
-        button[data-testid="collapsedControl"] {
-            display: none !important;
+            font-size: 1rem;
         }
 
         .stTextInput > div > div > input,
@@ -132,13 +114,22 @@ def apply_restaurant_menu_theme() -> None:
         .stDownloadButton > button,
         .stLinkButton > a {
             background: linear-gradient(180deg, #7a5a43 0%, #6B4F3A 100%);
-            color: #FFF9EF !important;
+            color: #ffffff !important;
             border: 1px solid #5A422F !important;
             border-radius: 999px !important;
             font-weight: 600;
+            font-size: 1rem;
+            min-height: 2.55rem;
             letter-spacing: 0.015em;
+            text-shadow: 0 1px 0 rgba(32, 20, 13, 0.45);
             box-shadow: 0 2px 8px rgba(68, 45, 29, 0.22);
             transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+        }
+
+        .stButton > button *,
+        .stDownloadButton > button *,
+        .stLinkButton > a * {
+            color: #ffffff !important;
         }
 
         .stButton > button:hover,
@@ -153,6 +144,12 @@ def apply_restaurant_menu_theme() -> None:
         .stDownloadButton > button:active,
         .stLinkButton > a:active {
             transform: translateY(0);
+        }
+
+        .stButton > button:focus,
+        .stDownloadButton > button:focus,
+        .stLinkButton > a:focus {
+            box-shadow: 0 0 0 0.18rem rgba(107, 79, 58, 0.28) !important;
         }
 
         div[data-testid="stVerticalBlockBorderWrapper"] {
@@ -170,8 +167,20 @@ def apply_restaurant_menu_theme() -> None:
             background: rgba(255, 250, 241, 0.94);
             border: 1px solid var(--menu-border);
             border-radius: 0.75rem;
-            padding: 0.55rem 0.6rem;
+            padding: 0.72rem 0.72rem;
             box-shadow: 0 2px 8px rgba(88, 60, 40, 0.07);
+        }
+
+        div[data-testid="stMetricLabel"] p {
+            font-size: 0.98rem !important;
+            color: #5b4434 !important;
+            font-weight: 700;
+        }
+
+        div[data-testid="stMetricValue"] {
+            font-size: 1.45rem !important;
+            color: #3b2f2a !important;
+            line-height: 1.1 !important;
         }
 
         div[data-testid="stTabs"] {
@@ -192,6 +201,8 @@ def apply_restaurant_menu_theme() -> None:
             border: 1px solid transparent !important;
             color: #5e4838 !important;
             font-weight: 600;
+            font-size: 1rem !important;
+            min-height: 2.2rem;
         }
 
         button[data-baseweb="tab"][aria-selected="true"] {
@@ -214,7 +225,7 @@ def apply_restaurant_menu_theme() -> None:
             border-radius: 0.65rem;
             background: rgba(255, 253, 247, 0.88);
             color: #3b2f2a;
-            font-size: 0.85rem;
+            font-size: 0.95rem;
             line-height: 1.45;
         }
 
@@ -227,7 +238,7 @@ def apply_restaurant_menu_theme() -> None:
             border-radius: 0.65rem;
             background: rgba(255, 253, 247, 0.64);
             color: #746152;
-            font-size: 0.9rem;
+            font-size: 1rem;
             font-weight: 600;
             text-align: center;
         }
@@ -259,10 +270,50 @@ def apply_restaurant_menu_theme() -> None:
         .menu-script-accent {
             font-family: "Allura", cursive;
             color: #7b6049;
-            font-size: 1.25rem;
+            font-size: 1.45rem;
             line-height: 1;
             margin-bottom: 0.05rem;
             letter-spacing: 0.02em;
+        }
+
+        .menu-page-header {
+            padding: 1rem 1.2rem;
+            margin-bottom: 0.7rem;
+            border: 1px solid rgba(200, 179, 138, 0.9);
+            border-radius: 0.9rem;
+            background: linear-gradient(120deg, rgba(255, 249, 239, 0.98) 0%, rgba(245, 233, 203, 0.93) 100%);
+            box-shadow: 0 7px 20px rgba(84, 56, 36, 0.1);
+        }
+
+        .menu-page-kicker {
+            margin: 0;
+            font-family: "Allura", cursive;
+            font-size: 1.45rem;
+            color: #7b6049;
+            line-height: 1;
+        }
+
+        .menu-page-title {
+            margin: 0.22rem 0 0.28rem 0;
+            font-family: "Playfair Display", "Cormorant Garamond", serif;
+            color: #5b4434;
+            font-size: 2rem;
+            line-height: 1.15;
+            letter-spacing: 0.01em;
+        }
+
+        .menu-page-subtitle {
+            margin: 0;
+            color: #4f3f34;
+            font-size: 1.05rem;
+            line-height: 1.5;
+            max-width: 72ch;
+        }
+
+        .search-guidance-text {
+            margin: 0.08rem 0 0.65rem 0;
+            color: #5a483d;
+            font-size: 0.98rem;
         }
 
         .search-hero {
@@ -298,28 +349,45 @@ def apply_restaurant_menu_theme() -> None:
         .search-hero h2 {
             margin: 0.2rem 0 0.18rem 0;
             color: #5b4434;
+            font-size: 1.75rem;
         }
 
         .search-hero p {
             margin: 0.2rem 0 0 0;
             color: #4a3a32;
             max-width: 62ch;
+            font-size: 1.03rem;
         }
 
         .menu-card-title {
             margin: 0;
             font-family: "Playfair Display", "Cormorant Garamond", serif;
             color: #5b4434;
-            font-size: 1.2rem;
+            font-size: 1.42rem;
             font-weight: 600;
             letter-spacing: 0.01em;
-            line-height: 1.18;
+            line-height: 1.25;
         }
 
         .menu-card-meta {
             margin: 0.18rem 0 0.35rem 0;
             color: #665244;
-            font-size: 0.94rem;
+            font-size: 1rem;
+        }
+
+        .menu-card-description {
+            margin: 0.2rem 0 0.4rem 0;
+            color: #3f322c;
+            font-size: 1.02rem;
+            line-height: 1.55;
+        }
+
+        .menu-card-overview-meta {
+            margin: 0.2rem 0 0.45rem 0;
+            color: #5e4a3e;
+            font-size: 0.96rem;
+            line-height: 1.42;
+            font-weight: 600;
         }
 
         .menu-card-image-placeholder {
@@ -331,14 +399,14 @@ def apply_restaurant_menu_theme() -> None:
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 0.76rem;
+            font-size: 0.95rem;
             font-weight: 600;
         }
 
         .menu-card-signal-row {
             margin: 0.35rem 0 0 0;
             color: #665244;
-            font-size: 0.82rem;
+            font-size: 1rem;
             line-height: 1.35;
         }
 
@@ -358,7 +426,7 @@ def apply_restaurant_menu_theme() -> None:
             border-radius: 999px;
             background: rgba(255, 250, 241, 0.94);
             color: #5b4434;
-            font-size: 0.74rem;
+            font-size: 0.9rem;
             font-weight: 700;
             white-space: nowrap;
             line-height: 1.1;
@@ -421,7 +489,11 @@ def apply_restaurant_menu_theme() -> None:
             }
 
             .menu-card-title {
-                font-size: 1.08rem;
+                font-size: 1.22rem;
+            }
+
+            .menu-page-title {
+                font-size: 1.62rem;
             }
         }
         </style>

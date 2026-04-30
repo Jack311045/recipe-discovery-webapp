@@ -162,8 +162,9 @@ def _attach_search_history_to_input() -> None:
                 const doc = window.parent.document;
                 const inputs = Array.from(doc.querySelectorAll("input"));
                 const input = inputs.find((node) =>
-                    node.getAttribute("aria-label") === "Search" ||
-                    node.getAttribute("placeholder") === "quick spicy tofu dinner..."
+                    (node.getAttribute("aria-label") || "").toLowerCase().includes("search recipes") ||
+                    (node.getAttribute("placeholder") || "").toLowerCase().includes("recipe name") ||
+                    node.getAttribute("aria-label") === "Search"
                 );
                 if (!input) {{
                     window.setTimeout(attach, 80);
@@ -445,110 +446,6 @@ st.markdown(
             grid-template-columns: 1fr;
         }
     }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor),
-    div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor),
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) {
-        position: fixed !important;
-        top: 0.55rem !important;
-        left: 1rem !important;
-        transform: none !important;
-        z-index: 99999 !important;
-        width: min(calc(100vw - 8.25rem), 1180px) !important;
-        box-sizing: border-box;
-        background: linear-gradient(180deg, rgba(255, 250, 241, 0.99) 0%, rgba(246, 235, 211, 0.99) 100%);
-        border: none;
-        border-bottom: 1px solid #b79f73;
-        border-radius: 0 0 10px 10px;
-        box-shadow: 0 4px 14px rgba(72, 48, 31, 0.12);
-        margin-bottom: 0.55rem;
-        overflow: visible;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) > div,
-    div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor) > div,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) > div {
-        padding: 0.28rem 0.55rem 0.34rem 0.55rem;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stVerticalBlock"],
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stVerticalBlock"] {
-        gap: 0.22rem;
-    }
-    .search-toolbar-anchor {
-        height: 0;
-        margin: 0;
-        padding: 0;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stTextInput label,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] label,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stSelectbox"] label,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stRadio"] label,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stSlider"] label,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stTextInput label,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] label,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stSelectbox"] label,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stRadio"] label,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stSlider"] label {
-        font-size: 0.72rem;
-        margin-bottom: 0;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stTextInput input,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stTextInput input {
-        min-height: 2.08rem;
-        padding-top: 0.15rem;
-        padding-bottom: 0.15rem;
-        font-size: 0.9rem;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section {
-        min-height: 2.08rem !important;
-        height: 2.08rem !important;
-        padding: 0.05rem 0.2rem !important;
-        overflow: hidden;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div {
-        gap: 0.15rem !important;
-        padding: 0 !important;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploaderDropzoneInstructions"],
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] small,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div > div:first-child,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] div:has(> small),
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploaderDropzoneInstructions"],
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] small,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div > div:first-child,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] div:has(> small) {
-        display: none !important;
-    }
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section > div {
-        color: transparent !important;
-        font-size: 0 !important;
-    }
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button {
-        color: white !important;
-        font-size: 0.78rem !important;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section p,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section small,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section [data-testid="stMarkdownContainer"],
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section p,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section small,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] section [data-testid="stMarkdownContainer"] {
-        display: none !important;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-baseweb="select"] > div,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-baseweb="select"] > div {
-        min-height: 1.86rem !important;
-        font-size: 0.78rem;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button,
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) .stButton > button,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) [data-testid="stFileUploader"] button,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) .stButton > button {
-        min-height: 2.08rem;
-        padding: 0.08rem 0.5rem;
-        white-space: nowrap;
-        font-size: 0.78rem;
-    }
     .upload-preview-row {
         display: grid;
         grid-template-columns: 42px 1fr;
@@ -558,45 +455,35 @@ st.markdown(
         min-height: 2.1rem;
     }
     .upload-empty {
-        min-height: 1.62rem;
+        min-height: 2.2rem;
         border: 1px dashed rgba(183, 159, 115, 0.8);
         border-radius: 8px;
         display: flex;
         align-items: center;
         justify-content: center;
         color: #6c5848;
-        font-size: 0.72rem;
+        font-size: 0.92rem;
+        text-align: center;
+        padding: 0.35rem 0.55rem;
         background: rgba(255, 253, 247, 0.68);
     }
     .upload-thumb-note {
-        font-size: 0.7rem;
+        font-size: 0.9rem;
         color: #6c5848;
-        line-height: 1.15;
-    }
-    .search-action-spacer {
-        height: 0;
-    }
-    div[data-testid="stElementContainer"]:has(.search-toolbar-anchor) div[data-testid="column"] .stButton > button,
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) div[data-testid="column"] .stButton > button {
-        min-height: 1.55rem;
-        padding: 0.08rem 0.45rem;
-        font-size: 0.72rem;
-        box-shadow: none;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    @media (max-width: 760px) {
-        div[data-testid="stElementContainer"]:has(.search-toolbar-anchor),
-        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]:has(.search-toolbar-anchor),
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.search-toolbar-anchor) {
-            top: 3.1rem;
-            left: 0.35rem;
-            right: 0.35rem;
-            width: auto;
-            transform: none;
-        }
+        line-height: 1.2;
     }
     </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <section class="menu-page-header">
+      <p class="menu-page-kicker">Today's Discovery Menu</p>
+      <h1 class="menu-page-title">Search Recipes</h1>
+      <p class="menu-page-subtitle">Search by recipe name, ingredients, cuisine style, tags, or meal ideas. Photo upload is optional and can be combined with text search.</p>
+    </section>
     """,
     unsafe_allow_html=True,
 )
@@ -648,50 +535,50 @@ with st.sidebar:
         help="Higher keeps the uploaded dish as the anchor. Lower lets the text steer more.",
     )
 
-# Compact spacer to keep results below the fixed search toolbar.
-st.markdown("<div style='height: 3.1rem; width: 100%; display: block;'></div>", unsafe_allow_html=True)
-
 with st.container(border=True):
+    st.markdown("#### Find your next recipe")
     st.markdown(
-        """
-        <div class="search-toolbar-anchor"></div>
-        """,
+        "<p class='search-guidance-text'>Type recipe names, ingredients, cuisine styles, tags, or meal ideas. Uploading a photo is optional.</p>",
         unsafe_allow_html=True,
     )
-    col_text, col_search, col_upload = st.columns([5.9, 1.05, 1.85], gap="small")
+
+    col_text, col_search, col_upload = st.columns([4.6, 1.2, 2.2], gap="medium")
 
     with col_text:
         query = st.text_input(
-            "Search",
-            placeholder="quick spicy tofu dinner...",
+            "Search recipes",
+            placeholder="Try: creamy mushroom pasta, spicy tofu bowl, gluten-free brunch, Italian weeknight dinner...",
             key="search_query_input",
             on_change=_submit_search_from_text,
             autocomplete="off",
-            label_visibility="collapsed",
+            help="You can type recipe names, ingredients, cuisine styles, tags, or meal ideas.",
         )
         _attach_search_history_to_input()
 
     with col_search:
+        st.markdown("<div style='height: 1.95rem;'></div>", unsafe_allow_html=True)
         search_clicked = st.button("Search", type="primary", use_container_width=True)
 
     with col_upload:
         upload_key = f"photo_upload_{st.session_state['upload_widget_version']}"
         uploaded_file = st.file_uploader(
-            "Photo",
+            "Optional photo upload",
             type=["png", "jpg", "jpeg"],
-            help="Upload a dish photo for image search. Maximum size: 50 MB.",
+            help="Optional: upload a dish photo for image-only search, or combine it with text search.",
             key=upload_key,
-            label_visibility="collapsed",
         )
         if uploaded_file is None:
-            st.markdown("<div class='upload-empty'>Photo optional</div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class='upload-empty'>Optional: add a dish photo for image-based search.</div>",
+                unsafe_allow_html=True,
+            )
         else:
             preview_cols = st.columns([0.65, 1.2], gap="small")
             with preview_cols[0]:
                 st.image(_open_uploaded_image(uploaded_file), width=42)
             with preview_cols[1]:
                 st.markdown(
-                    "<div class='upload-thumb-note'>Image ready</div>",
+                    "<div class='upload-thumb-note'>Image ready for search</div>",
                     unsafe_allow_html=True,
                 )
                 st.button(
@@ -701,6 +588,7 @@ with st.container(border=True):
                     on_click=_clear_uploaded_image,
                 )
 
+    st.markdown("##### Display options")
     col_sort, col_tags = st.columns([1.35, 1.8], gap="small")
     with col_sort:
         sort_mode = st.selectbox(
@@ -708,7 +596,6 @@ with st.container(border=True):
             SORT_OPTIONS,
             index=0,
             help="Display-only ordering. Retrieval and backend ranking are unchanged.",
-            label_visibility="collapsed",
         )
     with col_tags:
         max_tags = st.slider(
@@ -717,7 +604,6 @@ with st.container(border=True):
             max_value=12,
             value=8,
             help="Tag chips are visual only and do not affect ranking/filter behavior.",
-            label_visibility="collapsed",
         )
 history_search_requested = bool(st.session_state.pop("history_search_requested", False))
 run_search = search_clicked or history_search_requested
