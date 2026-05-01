@@ -56,6 +56,11 @@ Large files are stored outside Git. The shared Google Drive folder contains the
 processed Food.com file, `Processed_data_updated2.csv`, alongside the saved
 embedding and model artifacts used by the app.
 
+The processed CSV can be pulled from the same Google Drive folder as the
+artifacts, but it must live in this exact app path:
+`data/processed/Processed_data_updated2.csv`. The fetch script below places it
+there automatically.
+
 ```bash
 python scripts/fetch_gdrive_artifacts.py --folder "https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
 ```
