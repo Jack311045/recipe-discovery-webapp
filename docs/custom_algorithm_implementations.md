@@ -2,8 +2,7 @@
 
 This repo does include project-owned algorithm implementations that are more
 than thin wrappers around a library estimator. The clearest example is the
-PyTorch k-means clustering implementation. There is no Gaussian mixture model
-implementation in the current codebase.
+PyTorch k-means clustering implementation.
 
 ## Summary
 
