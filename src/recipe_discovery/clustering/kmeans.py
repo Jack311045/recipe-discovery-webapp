@@ -1,27 +1,4 @@
-"""K-means clustering on recipe embeddings, implemented from scratch in PyTorch.
-
-The public API stays compatible with the existing stub — ``KMeans(n_clusters=...,
-random_state=...)`` still works — but the implementation is upgraded to:
-
-- k-means++ initialization (Arthur & Vassilvitskii, 2007) instead of uniform random.
-- Squared Euclidean distance. On L2-normalized sentence-transformer outputs, this
-  is equivalent (up to a constant) to minimizing negative cosine similarity.
-- Empty-cluster reseeding to the data point currently farthest from any non-empty
-  centroid; prevents the algorithm from silently collapsing to < K effective
-  clusters when an initialization is unlucky.
-- ``n_init`` random restarts; the run with lowest inertia is kept (matches
-  scikit-learn semantics).
-- ``inertia_`` and ``n_iter_`` attributes for elbow plots and convergence
-  diagnostics.
-- ``save`` / ``load`` helpers that serialize centroids to joblib, mirroring
-  ``RecipeRegressor`` so artifacts are cross-machine portable (CPU-only teammates
-  can load models trained with GPU).
-
-References
-----------
-- Lloyd (1982), "Least squares quantization in PCM"
-- Arthur & Vassilvitskii (2007), "k-means++: The Advantages of Careful Seeding"
-"""
+"""From-scratch PyTorch k-means for recipe embedding clustering."""
 
 from __future__ import annotations
 
@@ -36,45 +13,33 @@ from recipe_discovery.utils.io import ensure_parent_dir
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
-    """Resolve a device spec, including the ``"auto"`` sentinel."""
     if device is None or device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
 class KMeans:
-    """K-means clustering implemented from scratch in PyTorch.
+    """K-means clustering with k-means++ init, n_init restarts, and empty-cluster reseeding.
 
     Parameters
     ----------
-    n_clusters : int
-        Number of clusters ``K``.
+    n_clusters : int, default=8
     max_iter : int, default=100
-        Maximum Lloyd iterations per run.
     tol : float, default=1e-4
-        Convergence tolerance on the Frobenius norm of the centroid shift.
     n_init : int, default=10
-        Number of random restarts; the run with lowest inertia is kept.
+        Number of random restarts; the lowest-inertia run is kept.
     init_method : {"k-means++", "random"}, default="k-means++"
-        Centroid initialization strategy.
     random_state : int, default=42
-        Base seed; restart ``i`` uses ``random_state + i``.
     device : str | torch.device | None, default=None
-        PyTorch device. ``None`` or ``"auto"`` selects CUDA when available,
-        else CPU.
+        ``None`` or ``"auto"`` selects CUDA when available, else CPU.
     verbose : bool, default=False
-        Print per-iteration inertia and centroid shift.
 
-    Attributes
-    ----------
-    centroids_ : np.ndarray of shape (n_clusters, n_features)
-        Set after :meth:`fit`. Stored as NumPy so artifacts are device-agnostic.
-    labels_ : np.ndarray of shape (n_samples,)
-        Cluster assignment for each training point.
-    inertia_ : float
-        Sum of squared distances from each point to its assigned centroid.
-    n_iter_ : int
-        Lloyd iterations used by the best (lowest-inertia) run.
+    Attributes (set after fit)
+    --------------------------
+    centroids_ : np.ndarray (n_clusters, n_features)
+    labels_    : np.ndarray (n_samples,)
+    inertia_   : float
+    n_iter_    : int
     """
 
     _VALID_INIT_METHODS = ("k-means++", "random")
@@ -115,31 +80,23 @@ class KMeans:
         self.inertia_: float | None = None
         self.n_iter_: int | None = None
 
-    # ------------------------------------------------------------------ init
-
     def _init_random(self, x: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
-        """Pick ``K`` distinct points uniformly at random as initial centroids."""
         n = x.shape[0]
         idx = torch.randperm(n, generator=generator, device=x.device)[: self.n_clusters]
         return x[idx].clone()
 
     def _init_kmeans_pp(self, x: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
-        """k-means++ seeding: first centroid uniform random, each subsequent centroid
-        sampled with probability proportional to ``D(x)^2``, where ``D(x)`` is the
-        distance to the nearest already-chosen centroid."""
+        """k-means++ seeding: each centroid sampled with probability proportional to D(x)^2."""
         n, d = x.shape
         centroids = torch.empty(self.n_clusters, d, device=x.device, dtype=x.dtype)
 
         first_idx = torch.randint(0, n, (1,), generator=generator, device=x.device)
         centroids[0] = x[first_idx]
-
-        # Running minimum squared distance from each point to any chosen centroid.
-        closest_sq = torch.cdist(x, centroids[0:1]).squeeze(1) ** 2  # (n,)
+        closest_sq = torch.cdist(x, centroids[0:1]).squeeze(1) ** 2
 
         for k in range(1, self.n_clusters):
             total = closest_sq.sum()
             if total <= 0:
-                # Degenerate case: every point coincides with a chosen centroid.
                 next_idx = torch.randint(0, n, (1,), generator=generator, device=x.device)
             else:
                 probs = closest_sq / total
@@ -150,29 +107,17 @@ class KMeans:
 
         return centroids
 
-    # --------------------------------------------------------------- Lloyd
-
     @staticmethod
     def _assign(
         x: torch.Tensor, centroids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """E-step: assign each point to its nearest centroid under squared Euclidean.
-
-        Returns
-        -------
-        labels : (n,) int64 tensor
-        min_sq : (n,) float tensor of squared distances to the assigned centroid
-        """
-        dists_sq = torch.cdist(x, centroids) ** 2  # (n, K)
+        """E-step: assign each point to its nearest centroid."""
+        dists_sq = torch.cdist(x, centroids) ** 2
         min_sq, labels = dists_sq.min(dim=1)
         return labels, min_sq
 
     def _update(self, x: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """M-step: each centroid becomes the mean of its assigned points.
-
-        Empty clusters are reseeded to the data point currently farthest from any
-        non-empty centroid.
-        """
+        """M-step: update centroids; reseed empty clusters to farthest data points."""
         k_total, d = self.n_clusters, x.shape[1]
         new_centroids = torch.zeros(k_total, d, device=x.device, dtype=x.dtype)
         counts = torch.zeros(k_total, device=x.device, dtype=x.dtype)
@@ -186,7 +131,6 @@ class KMeans:
         empty_idx = torch.where(~non_empty)[0]
         if len(empty_idx) > 0:
             if non_empty.sum().item() == 0:
-                # Pathological: nothing to re-seed from. Should be unreachable with K <= n.
                 raise RuntimeError(
                     "All clusters empty after update; check that n_samples >= n_clusters."
                 )
@@ -195,7 +139,6 @@ class KMeans:
             for k in empty_idx.tolist():
                 farthest = int(min_dist.argmax().item())
                 new_centroids[k] = x[farthest]
-                # Prevent two empty clusters from grabbing the same point.
                 min_dist[farthest] = -1.0
 
         return new_centroids
@@ -203,7 +146,6 @@ class KMeans:
     def _run_once(
         self, x: torch.Tensor, run_seed: int
     ) -> tuple[torch.Tensor, torch.Tensor, float, int]:
-        """One Lloyd run; returns (centroids, labels, inertia, n_iter)."""
         generator = torch.Generator(device=x.device).manual_seed(run_seed)
 
         if self.init_method == "k-means++":
@@ -232,15 +174,8 @@ class KMeans:
         inertia = float(sq_dists.sum().item())
         return centroids, labels, inertia, n_iter
 
-    # --------------------------------------------------------------- API
-
     def fit(self, x: np.ndarray | torch.Tensor) -> KMeans:
-        """Run k-means ``n_init`` times; keep the lowest-inertia result.
-
-        Parameters
-        ----------
-        x : np.ndarray or torch.Tensor of shape (n_samples, n_features)
-        """
+        """Run k-means n_init times; keep the lowest-inertia result."""
         x_t = self._as_tensor(x)
         if x_t.shape[0] < self.n_clusters:
             raise ValueError(
@@ -267,7 +202,6 @@ class KMeans:
         assert best_centroids is not None
         assert best_labels is not None
 
-        # Store centroids as NumPy so saved artifacts are device-agnostic.
         self.centroids_ = best_centroids.detach().cpu().numpy()
         self.labels_ = best_labels.detach().cpu().numpy()
         self.inertia_ = best_inertia
@@ -285,13 +219,12 @@ class KMeans:
         return labels.cpu().numpy()
 
     def fit_predict(self, x: np.ndarray | torch.Tensor) -> np.ndarray:
-        """Fit the model and return cluster assignments for the fit data."""
         self.fit(x)
         assert self.labels_ is not None
         return self.labels_
 
     def transform(self, x: np.ndarray | torch.Tensor) -> np.ndarray:
-        """Return Euclidean (not squared) distances from each point to every centroid."""
+        """Return Euclidean distances from each point to every centroid."""
         self._check_fitted()
         x_t = self._as_tensor(x)
         centroids_t = torch.from_numpy(self.centroids_).to(
@@ -300,12 +233,7 @@ class KMeans:
         return torch.cdist(x_t, centroids_t).cpu().numpy()
 
     def score_inertia(self, x: np.ndarray | torch.Tensor) -> float:
-        """Sum of squared distances from each point in ``x`` to its nearest centroid.
-
-        Note: ``inertia_`` holds the training-set value; use this method for val/test
-        sets. (Named ``score_inertia`` rather than ``inertia`` so it doesn't shadow the
-        attribute.)
-        """
+        """Sum of squared distances from points in x to their nearest centroid."""
         self._check_fitted()
         x_t = self._as_tensor(x)
         centroids_t = torch.from_numpy(self.centroids_).to(
@@ -314,10 +242,8 @@ class KMeans:
         _, sq = self._assign(x_t, centroids_t)
         return float(sq.sum().item())
 
-    # ---------------------------------------------------------- persistence
-
     def save(self, path: str | Path) -> None:
-        """Persist the fitted model via joblib. Mirrors :class:`RecipeRegressor`."""
+        """Persist the fitted model via joblib."""
         self._check_fitted()
         output_path = ensure_parent_dir(path)
         payload: dict[str, Any] = {
@@ -335,8 +261,7 @@ class KMeans:
 
     @classmethod
     def load(cls, path: str | Path) -> KMeans:
-        """Load a persisted KMeans model. Runs on CPU by default; call
-        ``model.to_device("cuda")`` afterwards if GPU inference is desired."""
+        """Load a persisted KMeans model (CPU by default; call to_device for GPU)."""
         payload = joblib.load(Path(path))
         if not isinstance(payload, dict) or "centroids_" not in payload:
             raise ValueError(f"Artifact at {path} is not a recognized KMeans payload.")
@@ -360,11 +285,9 @@ class KMeans:
         return model
 
     def to_device(self, device: str | torch.device) -> KMeans:
-        """Change the device used for future ``predict`` / ``transform`` calls."""
+        """Change the device used for future predict/transform calls."""
         self.device = _resolve_device(device)
         return self
-
-    # ---------------------------------------------------------- internals
 
     def _as_tensor(self, x: np.ndarray | torch.Tensor) -> torch.Tensor:
         if isinstance(x, np.ndarray):
@@ -378,16 +301,12 @@ class KMeans:
             raise RuntimeError("Model is not fitted. Call fit() first.")
 
 
-# ------------------------------------------------------------------- helpers
-
-
 def elbow_inertia(
     x: np.ndarray | torch.Tensor,
     k_values: list[int] | range,
     **kmeans_kwargs: Any,
 ) -> list[tuple[int, float]]:
-    """Run KMeans for each ``K`` in ``k_values`` and return ``(K, inertia)`` pairs
-    for elbow/knee plots. Keyword arguments are forwarded to :class:`KMeans`."""
+    """Run KMeans for each K in k_values; return [(K, inertia), ...]."""
     results: list[tuple[int, float]] = []
     for k in k_values:
         model = KMeans(n_clusters=int(k), **kmeans_kwargs).fit(x)
