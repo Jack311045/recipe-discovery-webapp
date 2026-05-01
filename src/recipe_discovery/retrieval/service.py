@@ -31,6 +31,13 @@ from recipe_discovery.embeddings.store import load_embeddings, load_recipe_ids
 from recipe_discovery.models.regression import RecipeRegressor
 from recipe_discovery.retrieval.filters import apply_basic_filters
 from recipe_discovery.retrieval.image_fetcher import attach_foodcom_images
+from recipe_discovery.retrieval.lexical import (
+    DEFAULT_LEXICAL_INDEX_PATH,
+    LexicalIndex,
+    align_lexical_index,
+    load_lexical_index,
+    score_lexical_query,
+)
 from recipe_discovery.retrieval.ranker import compute_combined_ranking
 from recipe_discovery.retrieval.similarity import cosine_similarity
 from recipe_discovery.settings import ARTIFACTS_DIR, DATA_PROCESSED_DIR
@@ -47,6 +54,8 @@ _SMALL_ARTIFACT_WARN_THRESHOLD = 5000
 _EXACT_TAG_SCORE_BOOST = 1.0
 _DEFAULT_CANDIDATE_POOL_MULTIPLIER = 10
 _INTENT_FILTER_CANDIDATE_POOL_MULTIPLIER = 50
+_HYBRID_SEMANTIC_WEIGHT = 0.70
+_HYBRID_KEYWORD_WEIGHT = 0.30
 _NEGATION_TOKENS = {
     "avoid",
     "except",
@@ -119,14 +128,11 @@ class RetrievalService:
         self.embeddings: np.ndarray | None = None
         self.metadata: pd.DataFrame | None = None
         self.one_hot_tag_columns: list[str] = []
+        self._lexical_index: LexicalIndex | None = None
         self._siglip_embeddings: np.ndarray | None = None
         self._siglip_processor: AutoProcessor | None = None
         self._siglip_model: AutoModel | None = None
-        self._siglip_device = (
-            "cuda"
-            if torch is not None and torch.cuda.is_available()
-            else "cpu"
-        )
+        self._siglip_device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
         self._text_query_cache: dict[str, np.ndarray] = {}
 
     @staticmethod
@@ -496,12 +502,49 @@ class RetrievalService:
         """Patch missing images in a result frame via Food.com lookup."""
         return attach_foodcom_images(results, fallback_image=FALLBACK_IMAGE_URL)
 
+    def _load_aligned_lexical_index(self, path: Path | None = None) -> LexicalIndex | None:
+        """Load optional lexical artifacts and align rows to loaded metadata."""
+        if self.metadata is None:
+            raise RuntimeError("Metadata must be loaded before lexical artifacts.")
+
+        lexical_path = Path(path) if path else DEFAULT_LEXICAL_INDEX_PATH
+        if not lexical_path.exists():
+            logger.info(
+                "Lexical index not found at %s; using dense-only text search.", lexical_path
+            )
+            return None
+
+        try:
+            index = load_lexical_index(lexical_path)
+            aligned = align_lexical_index(index, self.metadata[ID_COLUMN])
+        except Exception as exc:
+            logger.warning(
+                "Unable to load lexical index from %s; using dense-only text search: %s",
+                lexical_path,
+                exc,
+            )
+            return None
+
+        if aligned.matrix.shape[0] != len(self.metadata):
+            logger.warning(
+                "Lexical index row count does not match metadata; using dense-only text search."
+            )
+            return None
+
+        logger.info(
+            "Loaded lexical TF-IDF index: rows=%d, features=%d.",
+            aligned.matrix.shape[0],
+            aligned.matrix.shape[1],
+        )
+        return aligned
+
     def load(
         self,
         *,
         processed_path: Path | None = None,
         embeddings_path: Path | None = None,
         recipe_ids_path: Path | None = None,
+        lexical_index_path: Path | None = None,
     ) -> None:
         """Load encoder, embeddings, recipe_ids, and recipe-aligned metadata.
 
@@ -513,6 +556,9 @@ class RetrievalService:
             Optional override for embedding ``.npy`` path.
         recipe_ids_path:
             Optional override for row-aligned recipe IDs path.
+        lexical_index_path:
+            Optional override for TF-IDF lexical index path. Missing or stale
+            artifacts automatically fall back to dense-only text search.
         """
         metadata = load_processed_recipes(processed_path)
         embeddings = load_embeddings(embeddings_path)
@@ -522,6 +568,7 @@ class RetrievalService:
         self.embeddings = embeddings
         self.one_hot_tag_columns = get_one_hot_tag_columns(self.metadata)
         self._attach_image_urls()
+        self._lexical_index = self._load_aligned_lexical_index(lexical_index_path)
 
         encoder_config = self._get_encoder_config()
         self.encoder = RecipeEncoder(config=encoder_config)
@@ -547,7 +594,7 @@ class RetrievalService:
         # Attach 2D projections if available
         projections_path = ARTIFACTS_DIR / "projections_2d.npy"
         pca_projections_path = ARTIFACTS_DIR / "pca_projection.npy"
-        
+
         proj_file = projections_path if projections_path.exists() else pca_projections_path
         if proj_file.exists():
             try:
@@ -669,32 +716,34 @@ class RetrievalService:
 
     def get_all_projections(self) -> pd.DataFrame:
         """Return all available 2D projections for the background scatter plot.
-        
+
         Returns a DataFrame with ['recipe_id', 'x_proj', 'y_proj'] and metadata.
         Returns an empty DataFrame if projections are not loaded.
         """
         if self.metadata is None or "x_proj" not in self.metadata.columns:
             return pd.DataFrame(columns=[ID_COLUMN, "x_proj", "y_proj"])
-            
+
         # Return only the rows that actually have projection coordinates
         has_proj = self.metadata["x_proj"].notna()
         cols = [ID_COLUMN, "x_proj", "y_proj"]
-        
+
         cols_to_check = ["name", "minutes", "n_ingredients"]
         from recipe_discovery.data.schema import NUTRITION_COLUMNS
+
         cols_to_check.extend(NUTRITION_COLUMNS)
-        
+
         for c in cols_to_check:
             if c in self.metadata.columns:
                 cols.append(c)
-                
+
         df = self.metadata.loc[has_proj, cols].copy()
-        
+
         kmeans_path = ARTIFACTS_DIR / "kmeans.joblib"
         if kmeans_path.exists():
             try:
                 from recipe_discovery.clustering.kmeans import KMeans
                 import numpy as np
+
                 model = KMeans.load(kmeans_path)
                 if hasattr(model, "labels_") and model.labels_ is not None:
                     if len(model.labels_) == len(self.metadata):
@@ -703,40 +752,75 @@ class RetrievalService:
                         df["cluster"] = [f"Cluster {int(lbl)}" for lbl in labels_array[mask]]
             except Exception as e:
                 logger.warning(f"Failed to load clustering model labels: {e}")
-                
+
         return df.reset_index(drop=True)
-    def _search_candidates_for_vector(
-        self,
-        request: RetrievalRequest,
-        *,
-        query_vec: np.ndarray,
-        embeddings: np.ndarray,
-        limit_to_top_k: bool,
-    ) -> pd.DataFrame:
-        """Return filtered candidate matches for a query vector."""
+
+    def _empty_search_frame(self, extra_columns: Sequence[str] | None = None) -> pd.DataFrame:
+        """Return an empty metadata-shaped result frame with score columns."""
         if self.metadata is None:
             raise RuntimeError("RetrievalService is not loaded.")
 
-        if request.top_k <= 0:
-            return self.metadata.iloc[0:0].assign(similarity_score=pd.Series(dtype=float))
+        result = self.metadata.iloc[0:0].copy()
+        for column in extra_columns or []:
+            result[column] = pd.Series(dtype=float)
+        result["similarity_score"] = pd.Series(dtype=float)
+        return result
 
-        scores = cosine_similarity(query=query_vec, matrix=embeddings)
-
-        query_text = request.query or ""
+    def _candidate_pool_size(self, top_k: int, score_count: int, query_text: str) -> int:
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if top_k <= 0:
+            return 0
         candidate_pool_multiplier = self._candidate_pool_multiplier(query_text, self.metadata)
-        candidate_pool = min(
-            len(scores),
-            max(request.top_k * candidate_pool_multiplier, request.top_k),
-        )
-        if candidate_pool == 0:
-            return self.metadata.iloc[0:0].assign(similarity_score=pd.Series(dtype=float))
+        return min(score_count, max(top_k * candidate_pool_multiplier, top_k))
 
-        # Candidate pooling prevents filters from exhausting a too-small pre-truncated set.
-        top_idx = np.argpartition(-scores, candidate_pool - 1)[:candidate_pool]
-        ranked_idx = top_idx[np.argsort(-scores[top_idx])]
+    @staticmethod
+    def _top_score_indices(scores: np.ndarray, candidate_pool: int) -> np.ndarray:
+        """Return candidate indices sorted by descending score."""
+        if candidate_pool <= 0 or len(scores) == 0:
+            return np.array([], dtype=int)
+        if candidate_pool >= len(scores):
+            top_idx = np.arange(len(scores), dtype=int)
+        else:
+            top_idx = np.argpartition(-scores, candidate_pool - 1)[:candidate_pool]
+        return top_idx[np.argsort(-scores[top_idx], kind="stable")]
+
+    @staticmethod
+    def _normalize_candidate_scores(values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=float)
+        if values.size == 0:
+            return values
+        min_value = float(values.min())
+        max_value = float(values.max())
+        if np.isclose(max_value, min_value):
+            return np.zeros_like(values, dtype=float)
+        return (values - min_value) / (max_value - min_value)
+
+    def _rank_candidates_from_scores(
+        self,
+        request: RetrievalRequest,
+        *,
+        ranked_idx: np.ndarray,
+        scores: np.ndarray,
+        query_text: str,
+        limit_to_top_k: bool,
+        extra_score_columns: dict[str, np.ndarray] | None = None,
+    ) -> pd.DataFrame:
+        """Apply filters, tag boosts, and final truncation to pre-ranked candidates."""
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+
+        if len(ranked_idx) == 0:
+            return self._empty_search_frame(
+                extra_score_columns.keys() if extra_score_columns else None
+            )
 
         candidates = self.metadata.iloc[ranked_idx].copy()
+        if extra_score_columns:
+            for column, values in extra_score_columns.items():
+                candidates[column] = values[ranked_idx]
         candidates["similarity_score"] = scores[ranked_idx]
+
         filtered = apply_basic_filters(
             candidates,
             dietary_filter=request.dietary_filter,
@@ -768,20 +852,123 @@ class RetrievalService:
             )
             ranked["matched_query_tag"] = matched_tag_col
             ranked["boosted_similarity_score"] = (
-                ranked["similarity_score"]
-                + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
+                ranked["similarity_score"] + _EXACT_TAG_SCORE_BOOST * ranked["query_tag_match"]
             )
             ranked = ranked.sort_values(
                 ["boosted_similarity_score", "similarity_score"],
                 ascending=False,
+                kind="mergesort",
             )
         else:
-            ranked = filtered.sort_values("similarity_score", ascending=False)
+            ranked = filtered.sort_values(
+                "similarity_score",
+                ascending=False,
+                kind="mergesort",
+            )
 
         if limit_to_top_k:
             ranked = ranked.head(request.top_k)
 
         return ranked.reset_index(drop=True)
+
+    def _search_candidates_for_vector(
+        self,
+        request: RetrievalRequest,
+        *,
+        query_vec: np.ndarray,
+        embeddings: np.ndarray,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return filtered candidate matches for a query vector."""
+        if self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+
+        if request.top_k <= 0:
+            return self._empty_search_frame()
+
+        scores = cosine_similarity(query=query_vec, matrix=embeddings)
+
+        query_text = request.query or ""
+        candidate_pool = self._candidate_pool_size(request.top_k, len(scores), query_text)
+        if candidate_pool == 0:
+            return self._empty_search_frame()
+
+        # Candidate pooling prevents filters from exhausting a too-small pre-truncated set.
+        ranked_idx = self._top_score_indices(scores, candidate_pool)
+        return self._rank_candidates_from_scores(
+            request,
+            ranked_idx=ranked_idx,
+            scores=scores,
+            query_text=query_text,
+            limit_to_top_k=limit_to_top_k,
+        )
+
+    def _search_hybrid_candidates(
+        self,
+        request: RetrievalRequest,
+        *,
+        query_vec: np.ndarray,
+        limit_to_top_k: bool,
+    ) -> pd.DataFrame:
+        """Return text matches using a dense + TF-IDF keyword candidate union."""
+        if self.embeddings is None or self.metadata is None:
+            raise RuntimeError("RetrievalService is not loaded.")
+        if self._lexical_index is None:
+            return self._search_candidates_for_vector(
+                request,
+                query_vec=query_vec,
+                embeddings=self.embeddings,
+                limit_to_top_k=limit_to_top_k,
+            )
+
+        extra_columns = ["semantic_similarity_score", "keyword_similarity_score"]
+        if request.top_k <= 0:
+            return self._empty_search_frame(extra_columns)
+
+        query_text = request.query or ""
+        semantic_query = self._semantic_query_text(query_text, self.metadata)
+        semantic_scores = cosine_similarity(query=query_vec, matrix=self.embeddings)
+        keyword_scores = score_lexical_query(self._lexical_index, semantic_query)
+        if len(keyword_scores) != len(semantic_scores):
+            logger.warning("Lexical and dense score counts differ; using dense-only text search.")
+            return self._search_candidates_for_vector(
+                request,
+                query_vec=query_vec,
+                embeddings=self.embeddings,
+                limit_to_top_k=limit_to_top_k,
+            )
+
+        candidate_pool = self._candidate_pool_size(request.top_k, len(semantic_scores), query_text)
+        if candidate_pool == 0:
+            return self._empty_search_frame(extra_columns)
+
+        semantic_idx = self._top_score_indices(semantic_scores, candidate_pool)
+        keyword_idx = self._top_score_indices(keyword_scores, candidate_pool)
+        candidate_idx = np.unique(np.concatenate([semantic_idx, keyword_idx])).astype(int)
+        if candidate_idx.size == 0:
+            return self._empty_search_frame(extra_columns)
+
+        normalized_semantic = self._normalize_candidate_scores(semantic_scores[candidate_idx])
+        normalized_keyword = self._normalize_candidate_scores(keyword_scores[candidate_idx])
+        combined_candidate_scores = (
+            _HYBRID_SEMANTIC_WEIGHT * normalized_semantic
+            + _HYBRID_KEYWORD_WEIGHT * normalized_keyword
+        )
+
+        combined_scores = np.zeros_like(semantic_scores, dtype=float)
+        combined_scores[candidate_idx] = combined_candidate_scores
+        ranked_idx = candidate_idx[np.argsort(-combined_candidate_scores, kind="stable")]
+        return self._rank_candidates_from_scores(
+            request,
+            ranked_idx=ranked_idx,
+            scores=combined_scores,
+            query_text=query_text,
+            limit_to_top_k=limit_to_top_k,
+            extra_score_columns={
+                "semantic_similarity_score": semantic_scores,
+                "keyword_similarity_score": keyword_scores,
+            },
+        )
 
     def _search_candidates(
         self,
@@ -797,10 +984,9 @@ class RetrievalService:
             raise ValueError("Search query is required for text search.")
 
         query_vec = self._encode_text_query_vector(request.query)
-        return self._search_candidates_for_vector(
+        return self._search_hybrid_candidates(
             request,
             query_vec=query_vec,
-            embeddings=self.embeddings,
             limit_to_top_k=limit_to_top_k,
         )
 
@@ -872,9 +1058,7 @@ class RetrievalService:
             raise ValueError("embedding_space must be 'text' or 'siglip'.")
 
         excluded = {
-            str(recipe_id).strip()
-            for recipe_id in negative_recipe_ids
-            if str(recipe_id).strip()
+            str(recipe_id).strip() for recipe_id in negative_recipe_ids if str(recipe_id).strip()
         }
         if not excluded:
             results = self._search_candidates_for_vector(
