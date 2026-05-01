@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 from recipe_discovery.clustering.kmeans import KMeans
 from recipe_discovery.clustering.labels import name_clusters
@@ -54,8 +55,12 @@ def cluster_artifacts_available() -> bool:
     )
 
 
+@st.cache_resource(show_spinner="Loading cluster assignments…")
 def load_cluster_assignments() -> pd.DataFrame | None:
-    """Return ``DataFrame[recipe_id (str), cluster (int)]`` or ``None`` on failure."""
+    """Return ``DataFrame[recipe_id (str), cluster (int)]`` or ``None`` on failure.
+
+    Cached: the 332MB embedding load + KMeans.predict only runs once per session.
+    """
     if not cluster_artifacts_available():
         return None
     try:
@@ -77,15 +82,19 @@ def load_cluster_assignments() -> pd.DataFrame | None:
     )
 
 
-def load_cluster_name_map(cluster_df: pd.DataFrame) -> dict[int, str]:
+@st.cache_data(show_spinner="Naming clusters…")
+def load_cluster_name_map(_cluster_df: pd.DataFrame) -> dict[int, str]:
     """Generate cluster_id -> human-readable name using TF-IDF over recipe text.
 
     Uses the same naming pipeline as the Explore Clusters and Embedding Map
     pages so labels stay consistent everywhere.
+
+    Cached on the cluster_df identity (the leading underscore tells streamlit
+    not to hash the DataFrame contents — which would be slow for 226K rows).
     """
     csv_path = _processed_csv_path()
     if csv_path is None:
-        return {int(c): f"Cluster {int(c)}" for c in cluster_df["cluster"].unique()}
+        return {int(c): f"Cluster {int(c)}" for c in _cluster_df["cluster"].unique()}
 
     try:
         recipes = pd.read_csv(
@@ -94,12 +103,12 @@ def load_cluster_name_map(cluster_df: pd.DataFrame) -> dict[int, str]:
             low_memory=False,
         )
     except (FileNotFoundError, ValueError):
-        return {int(c): f"Cluster {int(c)}" for c in cluster_df["cluster"].unique()}
+        return {int(c): f"Cluster {int(c)}" for c in _cluster_df["cluster"].unique()}
 
     recipes["recipe_id"] = recipes["recipe_id"].astype(str)
-    merged = recipes.merge(cluster_df, on="recipe_id", how="inner")
+    merged = recipes.merge(_cluster_df, on="recipe_id", how="inner")
     if merged.empty:
-        return {int(c): f"Cluster {int(c)}" for c in cluster_df["cluster"].unique()}
+        return {int(c): f"Cluster {int(c)}" for c in _cluster_df["cluster"].unique()}
 
     named = name_clusters(
         merged,
@@ -138,13 +147,27 @@ def filter_results_by_cluster(
     """Keep only the rows in ``results`` whose ``recipe_id`` is in ``cluster_id``."""
     if "recipe_id" not in results.columns:
         return results
-    target_ids = set(
-        cluster_df.loc[cluster_df["cluster"] == cluster_id, "recipe_id"].astype(str)
+
+    # Normalize both sides to a clean string representation. Use ``Int64`` first
+    # to drop any trailing ".0" artifacts from float-roundtripped IDs, then cast
+    # to str so the set lookup is dtype-independent.
+    def _normalize(series: pd.Series) -> pd.Series:
+        return (
+            pd.to_numeric(series, errors="coerce")
+            .astype("Int64")
+            .astype(str)
+        )
+
+    cluster_ids_in_target = _normalize(
+        cluster_df.loc[cluster_df["cluster"] == cluster_id, "recipe_id"]
     )
+    target_ids = set(cluster_ids_in_target.dropna().tolist())
     if not target_ids:
         return results.iloc[0:0]
-    mask = results["recipe_id"].astype(str).isin(target_ids)
-    return results.loc[mask].reset_index(drop=True)
+
+    result_ids = _normalize(results["recipe_id"])
+    mask = result_ids.isin(target_ids)
+    return results.loc[mask.values].reset_index(drop=True)
 
 
 def cluster_filter_top_k_multiplier(
