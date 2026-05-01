@@ -45,6 +45,46 @@ logger = logging.getLogger(__name__)
 
 _SMALL_ARTIFACT_WARN_THRESHOLD = 5000
 _EXACT_TAG_SCORE_BOOST = 1.0
+_DEFAULT_CANDIDATE_POOL_MULTIPLIER = 10
+_INTENT_FILTER_CANDIDATE_POOL_MULTIPLIER = 50
+_NEGATION_TOKENS = {
+    "avoid",
+    "except",
+    "exclude",
+    "excluding",
+    "minus",
+    "no",
+    "non",
+    "not",
+    "without",
+}
+_NEGATION_SKIP_TOKENS = {"a", "an", "any", "the"}
+_MODIFIER_TOKENS = {
+    "free",
+    "less",
+    "light",
+    "lite",
+    "low",
+    "no",
+    "non",
+    "reduced",
+    "without",
+}
+_MODIFIER_PREFIX_TOKENS = {"light", "lite", "low", "no", "non", "reduced", "without"}
+_MODIFIER_SUFFIX_TOKENS = {"free", "less"}
+_NUTRITION_TOKEN_ALIASES = {
+    "calorie": "calorie",
+    "calories": "calorie",
+    "carb": "carbohydrate",
+    "carbs": "carbohydrate",
+    "carbohydrate": "carbohydrate",
+    "carbohydrates": "carbohydrate",
+    "fat": "fat",
+    "protein": "protein",
+    "salt": "sodium",
+    "sodium": "sodium",
+    "sugar": "sugar",
+}
 
 
 @dataclass
@@ -87,6 +127,7 @@ class RetrievalService:
             if torch is not None and torch.cuda.is_available()
             else "cpu"
         )
+        self._text_query_cache: dict[str, np.ndarray] = {}
 
     @staticmethod
     def _normalize_recipe_ids(values: pd.Series) -> pd.Series:
@@ -100,20 +141,19 @@ class RetrievalService:
         """Normalize label/query text for robust one-hot tag matching."""
         return re.sub(r"[^a-z0-9]+", "-", value.lower().strip()).strip("-")
 
-    def _resolve_query_tag_column(self, query: str, df: pd.DataFrame) -> str | None:
-        """Resolve exact/near-exact query intent to a known one-hot tag column."""
-        normalized_query = self._normalize_token(query)
-        if not normalized_query:
-            return None
-
+    def _normalized_tag_map(self, df: pd.DataFrame) -> dict[str, str]:
         tag_columns = self.one_hot_tag_columns or get_one_hot_tag_columns(df)
         if not tag_columns:
+            return {}
+        return {self._normalize_token(col): col for col in tag_columns}
+
+    def _resolve_normalized_tag(
+        self,
+        normalized_query: str,
+        normalized_to_col: dict[str, str],
+    ) -> str | None:
+        if not normalized_query:
             return None
-
-        normalized_to_col = {
-            self._normalize_token(col): col for col in tag_columns
-        }
-
         if normalized_query in normalized_to_col:
             return normalized_to_col[normalized_query]
 
@@ -134,6 +174,180 @@ class RetrievalService:
             if candidate in normalized_to_col:
                 return normalized_to_col[candidate]
         return None
+
+    def _resolve_query_tag_column(self, query: str, df: pd.DataFrame) -> str | None:
+        """Resolve exact/near-exact query intent to a known one-hot tag column."""
+        normalized_to_col = self._normalized_tag_map(df)
+        return self._resolve_normalized_tag(
+            self._normalize_token(query),
+            normalized_to_col,
+        )
+
+    def _query_tokens(self, query: str | None) -> list[str]:
+        normalized = self._normalize_token(query or "")
+        return [token for token in normalized.split("-") if token]
+
+    def _resolve_tag_from_tokens(
+        self,
+        tokens: list[str],
+        start: int,
+        normalized_to_col: dict[str, str],
+    ) -> tuple[str | None, int]:
+        """Resolve a tag column from a token span, preferring the longest span."""
+        while start < len(tokens) and tokens[start] in _NEGATION_SKIP_TOKENS:
+            start += 1
+        if start >= len(tokens):
+            return None, start
+
+        for end in range(len(tokens), start, -1):
+            candidate = "-".join(tokens[start:end])
+            tag_col = self._resolve_normalized_tag(candidate, normalized_to_col)
+            if tag_col is not None:
+                return tag_col, end
+        return None, start
+
+    def _resolve_negated_query_tag_columns(
+        self,
+        query: str | None,
+        df: pd.DataFrame,
+    ) -> list[str]:
+        """Return tag columns that should be excluded by negated query phrasing."""
+        tokens = self._query_tokens(query)
+        if not tokens:
+            return []
+
+        normalized_to_col = self._normalized_tag_map(df)
+        if not normalized_to_col:
+            return []
+
+        # Exact tag queries such as "no-cook" should stay positive tag intents.
+        normalized_query = "-".join(tokens)
+        if self._resolve_normalized_tag(normalized_query, normalized_to_col):
+            return []
+
+        excluded: list[str] = []
+        for idx, token in enumerate(tokens):
+            if token not in _NEGATION_TOKENS:
+                continue
+            tag_col, _ = self._resolve_tag_from_tokens(tokens, idx + 1, normalized_to_col)
+            if tag_col is not None:
+                excluded.append(tag_col)
+        return list(dict.fromkeys(excluded))
+
+    @staticmethod
+    def _canonical_nutrition_token(token: str) -> str | None:
+        return _NUTRITION_TOKEN_ALIASES.get(token)
+
+    def _resolve_modifier_conflict_columns(
+        self,
+        query: str | None,
+        df: pd.DataFrame,
+    ) -> list[str]:
+        """Find modifier tags that contradict a bare positive nutrient query.
+
+        Dense embeddings often treat "fat" and "low fat" as close because they
+        share the core concept. For bare nutrient searches, keep explicit
+        low/no/free variants from dominating unless the user asked for them.
+        """
+        tokens = self._query_tokens(query)
+        if not tokens or any(token in _MODIFIER_TOKENS for token in tokens):
+            return []
+
+        normalized_to_col = self._normalized_tag_map(df)
+        if not normalized_to_col:
+            return []
+        normalized_query = "-".join(tokens)
+        if self._resolve_normalized_tag(normalized_query, normalized_to_col):
+            return []
+
+        query_nutrients = {
+            canonical
+            for token in tokens
+            if (canonical := self._canonical_nutrition_token(token)) is not None
+        }
+        if not query_nutrients:
+            return []
+
+        conflicts: list[str] = []
+        for normalized_tag, col in normalized_to_col.items():
+            tag_tokens = [token for token in normalized_tag.split("-") if token]
+            if not tag_tokens:
+                continue
+            has_negating_modifier = (
+                tag_tokens[0] in _MODIFIER_PREFIX_TOKENS
+                or tag_tokens[-1] in _MODIFIER_SUFFIX_TOKENS
+            )
+            if not has_negating_modifier:
+                continue
+
+            tag_nutrients = {
+                canonical
+                for token in tag_tokens
+                if (canonical := self._canonical_nutrition_token(token)) is not None
+            }
+            if query_nutrients & tag_nutrients:
+                conflicts.append(col)
+        return list(dict.fromkeys(conflicts))
+
+    def _query_intent_exclusion_columns(
+        self,
+        query: str | None,
+        df: pd.DataFrame,
+    ) -> list[str]:
+        excluded = [
+            *self._resolve_negated_query_tag_columns(query, df),
+            *self._resolve_modifier_conflict_columns(query, df),
+        ]
+        return list(dict.fromkeys(excluded))
+
+    def _apply_query_intent_exclusions(
+        self,
+        df: pd.DataFrame,
+        query: str | None,
+    ) -> pd.DataFrame:
+        """Apply structured exclusions inferred from query wording."""
+        excluded_cols = self._query_intent_exclusion_columns(query, df)
+        excluded_cols = [col for col in excluded_cols if col in df.columns]
+        if not excluded_cols or df.empty:
+            return df
+
+        keep = pd.Series(True, index=df.index)
+        for col in excluded_cols:
+            values = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+            keep &= values.ne(1)
+        return df.loc[keep].reset_index(drop=True)
+
+    def _semantic_query_text(self, query: str, df: pd.DataFrame | None) -> str:
+        """Remove negated tag phrases before embedding the semantic query text."""
+        if df is None:
+            return query
+
+        tokens = self._query_tokens(query)
+        if not tokens:
+            return query
+
+        normalized_to_col = self._normalized_tag_map(df)
+        if not normalized_to_col:
+            return query
+
+        remove_indices: set[int] = set()
+        for idx, token in enumerate(tokens):
+            if token not in _NEGATION_TOKENS:
+                continue
+            tag_col, end = self._resolve_tag_from_tokens(tokens, idx + 1, normalized_to_col)
+            if tag_col is not None:
+                remove_indices.update(range(idx, end))
+
+        if not remove_indices:
+            return query
+
+        remaining = [token for idx, token in enumerate(tokens) if idx not in remove_indices]
+        return " ".join(remaining) if remaining else "recipe"
+
+    def _candidate_pool_multiplier(self, query: str | None, df: pd.DataFrame) -> int:
+        if self._query_intent_exclusion_columns(query, df):
+            return _INTENT_FILTER_CANDIDATE_POOL_MULTIPLIER
+        return _DEFAULT_CANDIDATE_POOL_MULTIPLIER
 
     def _get_encoder_config(self) -> EmbeddingConfig:
         """Build encoder config, preferring saved embedding metadata when present."""
@@ -508,7 +722,12 @@ class RetrievalService:
 
         scores = cosine_similarity(query=query_vec, matrix=embeddings)
 
-        candidate_pool = min(len(scores), max(request.top_k * 10, request.top_k))
+        query_text = request.query or ""
+        candidate_pool_multiplier = self._candidate_pool_multiplier(query_text, self.metadata)
+        candidate_pool = min(
+            len(scores),
+            max(request.top_k * candidate_pool_multiplier, request.top_k),
+        )
         if candidate_pool == 0:
             return self.metadata.iloc[0:0].assign(similarity_score=pd.Series(dtype=float))
 
@@ -533,10 +752,10 @@ class RetrievalService:
             min_rating=request.min_rating,
         )
 
+        filtered = self._apply_query_intent_exclusions(filtered, query_text)
         if filtered.empty:
             return filtered
 
-        query_text = request.query or ""
         matched_tag_col = self._resolve_query_tag_column(query_text, filtered)
         if matched_tag_col and matched_tag_col in filtered.columns:
             ranked = filtered.copy()
@@ -577,8 +796,7 @@ class RetrievalService:
         if not request.query or not request.query.strip():
             raise ValueError("Search query is required for text search.")
 
-        encoded = self.encoder.encode([request.query], show_progress=False)
-        query_vec = np.asarray(encoded)[0]
+        query_vec = self._encode_text_query_vector(request.query)
         return self._search_candidates_for_vector(
             request,
             query_vec=query_vec,
@@ -586,19 +804,30 @@ class RetrievalService:
             limit_to_top_k=limit_to_top_k,
         )
 
-    def encode_text_query(self, query: str) -> np.ndarray:
-        """Encode a text query into the loaded SBERT embedding space."""
+    def _encode_text_query_vector(self, query: str) -> np.ndarray:
+        """Encode and cache a normalized text query vector for this service."""
         if self.encoder is None:
             raise RuntimeError("RetrievalService is not loaded.")
         if not query or not query.strip():
             raise ValueError("Search query is required for text feedback.")
 
-        encoded = self.encoder.encode([query], show_progress=False)
+        semantic_query = self._semantic_query_text(query, self.metadata)
+        cache_key = self._normalize_token(semantic_query)
+        cached = self._text_query_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        encoded = self.encoder.encode([semantic_query], show_progress=False)
         vec = np.asarray(encoded, dtype=float)[0]
         norm = np.linalg.norm(vec)
-        if norm == 0:
-            return vec
-        return vec / norm
+        if norm > 0:
+            vec = vec / norm
+        self._text_query_cache[cache_key] = vec
+        return vec.copy()
+
+    def encode_text_query(self, query: str) -> np.ndarray:
+        """Encode a text query into the loaded SBERT embedding space."""
+        return self._encode_text_query_vector(query)
 
     def encode_image_query(self, image: Image.Image) -> np.ndarray:
         """Encode an uploaded image into the loaded SigLIP embedding space."""
@@ -614,7 +843,8 @@ class RetrievalService:
     ) -> np.ndarray:
         """Encode text + image into the loaded SigLIP embedding space."""
         self._load_siglip_embeddings()
-        return self.encode_combined(text, image, alpha=alpha)
+        semantic_text = self._semantic_query_text(text, self.metadata)
+        return self.encode_combined(semantic_text, image, alpha=alpha)
 
     def search_with_negative_feedback(
         self,
@@ -821,7 +1051,8 @@ class RetrievalService:
             raise RuntimeError("SigLIP embeddings failed to load.")
 
         image_vec = self._encode_image(image)
-        text_vec = self._encode_siglip_text(text)
+        semantic_text = self._semantic_query_text(text, self.metadata)
+        text_vec = self._encode_siglip_text(semantic_text)
         image_scores = cosine_similarity(query=image_vec, matrix=self._siglip_embeddings)
         text_scores = cosine_similarity(query=text_vec, matrix=self._siglip_embeddings)
         combined_scores = alpha * image_scores + (1.0 - alpha) * text_scores
@@ -851,6 +1082,7 @@ class RetrievalService:
             max_time_minutes=request.max_time_minutes,
             max_ingredients=request.max_ingredients,
         )
+        filtered = self._apply_query_intent_exclusions(filtered, request.query or text)
 
         if filtered.empty:
             return filtered

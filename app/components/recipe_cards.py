@@ -321,6 +321,35 @@ def _build_recipe_widget_suffix(recipe: Mapping[str, object], rank: int | None) 
     return f"{clean or 'recipe'}_{rank_part}"
 
 
+def _render_action_button_styles() -> None:
+    """Keep recipe-card action buttons aligned even when labels are short/long."""
+    st.markdown(
+        """
+        <style>
+        .stButton > button,
+        .stLinkButton > a {
+            min-height: 2.55rem !important;
+            height: 2.55rem !important;
+            max-height: 2.55rem !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            white-space: nowrap !important;
+        }
+        .stButton > button *,
+        .stLinkButton > a * {
+            color: #ffffff !important;
+            white-space: nowrap !important;
+            line-height: 1 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_recipe_card(
     recipe: Mapping[str, object],
     rank: int | None = None,
@@ -406,6 +435,7 @@ def render_recipe_card(
         )
 
         if num_actions > 0:
+            _render_action_button_styles()
             action_cols = st.columns(num_actions)
             col_idx = 0
             if food_url:
@@ -416,8 +446,9 @@ def render_recipe_card(
                 with action_cols[col_idx]:
                     suffix = _build_recipe_widget_suffix(recipe, rank)
                     add_clicked = st.button(
-                        "Add to shopping list",
+                        "+",
                         key=f"{widget_key_prefix}_add_to_list_{suffix}",
+                        help="Add ingredients to shopping list.",
                         use_container_width=True,
                     )
                     if add_clicked:

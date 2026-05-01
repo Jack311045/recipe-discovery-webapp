@@ -35,7 +35,6 @@ from recipe_discovery.clustering.labels import name_clusters
 from recipe_discovery.retrieval.service import RetrievalRequest
 from recipe_discovery.settings import ARTIFACTS_DIR
 
-st.set_page_config(page_title="Embedding Map", layout="wide")
 apply_restaurant_menu_theme()
 st.title("🗺️ Embedding Map")
 st.caption(

@@ -12,8 +12,15 @@ APP_DIR = ROOT / "app"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
+from app.components.theme import apply_restaurant_menu_theme
+from app.service_loader import start_retrieval_service_warmup
+
 
 def main() -> None:
+    st.set_page_config(page_title="Recipe Discovery", layout="wide")
+    apply_restaurant_menu_theme()
+    start_retrieval_service_warmup()
+
     pages = [
         st.Page(APP_DIR / "pages" / "1_Search.py", title="Search", default=True),
         st.Page(APP_DIR / "pages" / "5_Shopping_List.py", title="Shopping List"),

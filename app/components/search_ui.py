@@ -15,6 +15,13 @@ SORT_OPTIONS = [
     "Fewest ingredients",
 ]
 
+DEFAULT_SEARCH_RESULT_LIMIT = 14
+LOAD_MORE_RESULT_INCREMENT = 6
+SEARCH_PREFETCH_RESULT_LIMIT = (
+    DEFAULT_SEARCH_RESULT_LIMIT + LOAD_MORE_RESULT_INCREMENT * 2
+)
+
+
 def _as_float(value: object) -> float | None:
     """Convert a value to float, returning None for invalid values."""
     try:
@@ -89,6 +96,46 @@ def sort_results_for_display(results_df: pd.DataFrame, sort_mode: str) -> pd.Dat
     ).drop(columns=["_sort_primary"])
 
     return ranked.reset_index(drop=True)
+
+
+def merge_appended_results(
+    existing_results: pd.DataFrame,
+    expanded_results: pd.DataFrame,
+    *,
+    limit: int,
+) -> pd.DataFrame:
+    """Append newly fetched results after the recipes already visible.
+
+    Retrieval may slightly reorder rows when the backend is asked for a larger
+    pool. The UI load-more action should still feel like appending, so existing
+    rows keep their order and only unseen recipes are added below them.
+    """
+    if existing_results.empty:
+        return expanded_results.head(limit).reset_index(drop=True).copy()
+    if expanded_results.empty:
+        return existing_results.head(limit).reset_index(drop=True).copy()
+
+    key_column = next(
+        (
+            column
+            for column in ("recipe_id", "id", "name")
+            if column in existing_results.columns and column in expanded_results.columns
+        ),
+        None,
+    )
+    if key_column is None:
+        combined = pd.concat([existing_results, expanded_results], ignore_index=True)
+        return combined.drop_duplicates().head(limit).reset_index(drop=True)
+
+    visible = existing_results.drop_duplicates(subset=[key_column], keep="first")
+    visible = visible.head(limit)
+    seen_keys = set(visible[key_column].astype(str))
+    new_rows = expanded_results[
+        ~expanded_results[key_column].astype(str).isin(seen_keys)
+    ]
+    combined = pd.concat([visible, new_rows], ignore_index=True)
+    combined = combined.drop_duplicates(subset=[key_column], keep="first")
+    return combined.head(limit).reset_index(drop=True)
 
 
 def infer_tag_columns(results_df: pd.DataFrame) -> list[str]:

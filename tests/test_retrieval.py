@@ -74,6 +74,8 @@ def toy_service() -> RetrievalService:
             "korean": [0, 0, 0, 1, 0],
             "italian": [1, 0, 0, 0, 0],
             "desserts": [0, 0, 1, 0, 0],
+            "low-fat": [1, 1, 0, 0, 0],
+            "low-saturated-fat": [1, 0, 0, 0, 0],
             "5-ingredients-or-less": [0, 1, 1, 1, 1],
             "15-minutes-or-less": [1, 0, 0, 0, 0],
             "30-minutes-or-less": [1, 1, 1, 0, 0],
@@ -194,6 +196,25 @@ def test_retrieval_service_load_accepts_path_overrides(
     assert service.metadata["recipe_id"].astype(str).tolist() == ["10", "20", "30"]
 
 
+def test_text_query_encoding_is_cached_per_service(toy_service: RetrievalService) -> None:
+    class CountingEncoder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = texts, show_progress
+            self.calls += 1
+            return np.array([[1.0, 0.0]])
+
+    encoder = CountingEncoder()
+    toy_service.encoder = encoder
+
+    toy_service.encode_text_query("quick dinner")
+    toy_service.search(RetrievalRequest(query="quick dinner", top_k=2))
+
+    assert encoder.calls == 1
+
+
 def test_load_warns_for_tiny_embedding_artifact(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -288,6 +309,42 @@ def test_near_exact_tag_query_with_suffix_prioritizes_matches(
     assert result.iloc[0]["korean"] == 1
 
 
+def test_negated_tag_query_excludes_matching_tag(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="non korean", top_k=5))
+
+    assert not result.empty
+    assert (result["korean"] == 0).all()
+    assert "query_tag_match" not in result.columns
+
+
+def test_negated_tag_query_rewrites_semantic_text_before_encoding() -> None:
+    encoded_texts: list[str] = []
+
+    class CapturingEncoder:
+        def encode(self, texts: list[str], *, show_progress: bool = False) -> np.ndarray:
+            _ = show_progress
+            encoded_texts.extend(texts)
+            return np.array([[1.0, 0.0]], dtype=float)
+
+    service = RetrievalService()
+    service.encoder = CapturingEncoder()
+    service.embeddings = np.array([[1.0, 0.0], [0.9, 0.1]], dtype=float)
+    service.metadata = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2"],
+            "name": ["A", "B"],
+            "korean": [1, 0],
+        }
+    )
+
+    result = service.search(RetrievalRequest(query="non korean dinner", top_k=1))
+
+    assert encoded_texts == ["dinner"]
+    assert result.iloc[0]["korean"] == 0
+
+
 def test_exact_tag_query_prioritizes_vegan_matches(toy_service: RetrievalService) -> None:
     result = toy_service.search(RetrievalRequest(query="vegan", top_k=5))
 
@@ -302,6 +359,26 @@ def test_exact_tag_query_prioritizes_desserts_matches(toy_service: RetrievalServ
     assert not result.empty
     assert "query_tag_match" in result.columns
     assert result.iloc[0]["desserts"] == 1
+
+
+def test_bare_fat_query_does_not_return_low_fat_modifier_tags(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="fat", top_k=3))
+
+    assert not result.empty
+    assert (result["low-fat"] == 0).all()
+    assert (result["low-saturated-fat"] == 0).all()
+
+
+def test_explicit_low_fat_query_still_prioritizes_low_fat_tag(
+    toy_service: RetrievalService,
+) -> None:
+    result = toy_service.search(RetrievalRequest(query="low fat", top_k=5))
+
+    assert not result.empty
+    assert "query_tag_match" in result.columns
+    assert result.iloc[0]["low-fat"] == 1
 
 
 def test_free_text_non_exact_query_keeps_semantic_path(
