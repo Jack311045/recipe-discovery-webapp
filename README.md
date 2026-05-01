@@ -77,6 +77,6 @@ streamlit run app/streamlit_app.py
 2. Build recipe text fields
 3. Compute recipe embeddings
 4. Run cosine retrieval for user queries
-5. Fit k-means clusters for exploration
+5. Fit k-means clusters for exploration (Implemented without a wrapper)
 6. Produce 2D projection with PCA
 7. Surface everything in Streamlit
