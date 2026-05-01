@@ -1,4 +1,4 @@
-"""Semantic search page — wired to RetrievalService."""
+"""Semantic search page 鈥?wired to RetrievalService."""
 
 from __future__ import annotations
 
@@ -39,6 +39,14 @@ from app.components.shopping_list import (
     add_ingredients_to_shopping_list,
     ensure_shopping_list_state,
     get_shopping_list_count,
+)
+from app.cluster_filter import (
+    build_dropdown_options,
+    cluster_artifacts_available,
+    cluster_filter_top_k_multiplier,
+    filter_results_by_cluster,
+    load_cluster_assignments,
+    load_cluster_name_map,
 )
 from app.service_loader import get_retrieval_service
 
@@ -526,6 +534,28 @@ with st.sidebar:
         )
 
     top_k = st.slider("Number of results", min_value=3, max_value=20, value=8)
+
+    # Cluster filter (only rendered when k-means artifact is available)
+    selected_cluster_id: int | None = None
+    cluster_assignments_df: pd.DataFrame | None = None
+    if cluster_artifacts_available():
+        cluster_assignments_df = load_cluster_assignments()
+        if cluster_assignments_df is not None and not cluster_assignments_df.empty:
+            cluster_name_map = load_cluster_name_map(cluster_assignments_df)
+            cluster_options = build_dropdown_options(cluster_assignments_df, cluster_name_map)
+            cluster_label_to_id = dict(cluster_options)
+            cluster_label = st.selectbox(
+                "Limit to cluster",
+                options=[label for label, _ in cluster_options],
+                index=0,
+                help=(
+                    "Restrict search to recipes within a specific semantic cluster. "
+                    "Use this to focus, e.g., on pasta-style recipes when searching "
+                    "for 'summer dinner'."
+                ),
+            )
+            selected_cluster_id = cluster_label_to_id[cluster_label]
+
     alpha = st.slider(
         "Image vs text weight (combined search)",
         min_value=0.1,
@@ -613,9 +643,19 @@ if run_search:
 
     svc = get_retrieval_service()
     _reset_feedback()
+
+    # If a cluster filter is active, over-fetch so the post-filter result set
+    # is still close to the user's requested top_k. Multiplier is ~1/cluster_share.
+    effective_top_k = top_k
+    if selected_cluster_id is not None and cluster_assignments_df is not None:
+        multiplier = cluster_filter_top_k_multiplier(
+            selected_cluster_id, cluster_assignments_df
+        )
+        effective_top_k = top_k * multiplier
+
     request = RetrievalRequest(
         query=query,
-        top_k=top_k,
+        top_k=effective_top_k,
         dietary_filter=diet_options[diet_label],
         max_time_minutes=max_time,
         max_ingredients=max_ingredients,
@@ -669,6 +709,18 @@ if run_search:
 
     results_placeholder.empty()
 
+    # Apply cluster filter (if active) and trim to user's requested top_k.
+    if (
+        isinstance(results, pd.DataFrame)
+        and selected_cluster_id is not None
+        and cluster_assignments_df is not None
+    ):
+        results = filter_results_by_cluster(
+            results, selected_cluster_id, cluster_assignments_df
+        )
+        if len(results) > top_k:
+            results = results.iloc[:top_k].reset_index(drop=True)
+
     if isinstance(results, pd.DataFrame):
         st.session_state["search_results_df"] = results.copy()
         st.session_state["last_query"] = query.strip()
@@ -710,7 +762,7 @@ if isinstance(results_df, pd.DataFrame):
         has_proj = "x_proj" in display_df.columns
         if has_proj:
             st.caption(
-                "📍 PCA coordinates are attached — check the Embedding Map page "
+                "馃搷 PCA coordinates are attached 鈥?check the Embedding Map page "
                 "to see where these land!"
             )
 
