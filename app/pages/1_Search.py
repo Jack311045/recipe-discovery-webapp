@@ -1,4 +1,4 @@
-"""Semantic search page 鈥?wired to RetrievalService."""
+"""Semantic search page - wired to RetrievalService."""
 
 from __future__ import annotations
 
@@ -762,7 +762,7 @@ if isinstance(results_df, pd.DataFrame):
         has_proj = "x_proj" in display_df.columns
         if has_proj:
             st.caption(
-                "馃搷 PCA coordinates are attached 鈥?check the Embedding Map page "
+                "📍 PCA coordinates are attached - check the Embedding Map page "
                 "to see where these land!"
             )
 
