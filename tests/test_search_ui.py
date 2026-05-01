@@ -5,9 +5,13 @@ from __future__ import annotations
 import pandas as pd
 
 from app.components.search_ui import (
+    DEFAULT_SEARCH_RESULT_LIMIT,
+    LOAD_MORE_RESULT_INCREMENT,
+    SEARCH_PREFETCH_RESULT_LIMIT,
     build_result_summary,
     get_active_tags,
     infer_tag_columns,
+    merge_appended_results,
     sort_results_for_display,
 )
 
@@ -99,3 +103,51 @@ def test_infer_tag_columns_and_get_active_tags() -> None:
     assert "vegetarian" in tag_columns
     assert "italian" in tag_columns
     assert active_tags == ["vegetarian"]
+
+
+def test_default_search_result_limit_is_fourteen() -> None:
+    assert DEFAULT_SEARCH_RESULT_LIMIT == 14
+
+
+def test_search_prefetch_limit_caches_two_load_more_batches() -> None:
+    assert SEARCH_PREFETCH_RESULT_LIMIT == (
+        DEFAULT_SEARCH_RESULT_LIMIT + LOAD_MORE_RESULT_INCREMENT * 2
+    )
+
+
+def test_merge_appended_results_preserves_visible_order_and_appends_new_rows() -> None:
+    existing = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2"],
+            "name": ["Visible A", "Visible B"],
+        }
+    )
+    expanded = pd.DataFrame(
+        {
+            "recipe_id": ["3", "1", "2", "4"],
+            "name": ["New C", "Visible A", "Visible B", "New D"],
+        }
+    )
+
+    merged = merge_appended_results(existing, expanded, limit=4)
+
+    assert merged["recipe_id"].tolist() == ["1", "2", "3", "4"]
+
+
+def test_merge_appended_results_respects_limit() -> None:
+    existing = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2"],
+            "name": ["Visible A", "Visible B"],
+        }
+    )
+    expanded = pd.DataFrame(
+        {
+            "recipe_id": ["1", "2", "3", "4"],
+            "name": ["Visible A", "Visible B", "New C", "New D"],
+        }
+    )
+
+    merged = merge_appended_results(existing, expanded, limit=3)
+
+    assert merged["recipe_id"].tolist() == ["1", "2", "3"]

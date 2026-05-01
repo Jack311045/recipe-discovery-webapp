@@ -1,82 +1,186 @@
 # Recipe Discovery Web App
 
-A semantic recipe discovery application built on the Food.com Recipes and Interactions dataset.
+A semantic recipe discovery application built on the Food.com Recipes and
+Interactions dataset.
 
-## Project goal
+## Project Goal
 
-Given a natural-language food request and optional dietary constraints, return the most relevant recipes, organize them into semantic clusters, and visualize recipe relationships in 2D.
+Given a natural-language food request, optional dietary constraints, and
+optional image input, return relevant recipes, organize them into semantic
+clusters, and visualize recipe relationships in 2D.
 
-## Course methods represented in this repository
+## Methods Represented
 
-- Dense text embeddings for recipes
-- Cosine-similarity nearest-neighbor retrieval
-- K-means clustering on recipe embeddings
-- Regression model for recipe quality or rating prediction
-- PCA and deep autoencoder for 2D visualization
-- Classification module for recipe tag prediction
+- Dense SBERT text embeddings for recipes.
+- Hybrid dense + TF-IDF keyword retrieval for text search.
+- Cosine-similarity scoring over recipe embedding matrices.
+- Manual/from-scratch PyTorch k-means clustering in
+  `src/recipe_discovery/clustering/kmeans.py`.
+- Optional SigLIP multimodal embeddings for image and image+text search.
+- Regression model for recipe quality/rating prediction.
+- PCA and deep autoencoder reducers for 2D visualization.
+- Classification module for recipe tag prediction.
 
-## Quick start
+The k-means implementation is project-owned code, not `sklearn.cluster.KMeans`.
+It implements k-means++ initialization, Lloyd assignment/update steps,
+empty-cluster reseeding, multiple restarts, inertia scoring, prediction,
+distance transforms, and save/load persistence.
 
-### 1) Create a virtual environment
+## Quick Start From A Fresh Clone
 
-#### macOS / Linux
+### 1) Create A Virtual Environment
+
+macOS / Linux:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-#### Windows PowerShell
+Windows PowerShell:
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-### 2) Install dependencies
+### 2) Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3) Fetch processed data + artifacts (required)
-The app expects a processed CSV plus embedding artifacts. These are stored
-outside of Git due to size.
+### 3) Fetch Processed Data And Artifacts
+
+Large files are stored outside Git. The shared Google Drive folder contains the
+processed Food.com file, `Processed_data_updated2.csv`, alongside the saved
+embedding and model artifacts used by the app.
+
+The processed CSV can be pulled from the same Google Drive folder as the
+artifacts, but it must live in this exact app path:
+`data/processed/Processed_data_updated2.csv`. The fetch script below places it
+there automatically.
 
 ```bash
 python scripts/fetch_gdrive_artifacts.py --folder "https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
 ```
 
-You can also set it once and reuse it:
+You can also set the folder once and reuse it:
+
 ```bash
 export GDRIVE_ARTIFACTS_FOLDER="https://drive.google.com/drive/folders/1bzKGQINcPabu0nIFnEqkJQwMlJgVRPLK?usp=sharing"
 python scripts/fetch_gdrive_artifacts.py
 ```
 
-#### Optional: raw Kaggle data (only if you plan to rebuild)
-If you want to rebuild the processed CSV, you will need the Kaggle raw files:
-- `data/raw/RAW_recipes.csv`
-- `data/raw/RAW_interactions.csv`
+The fetch script installs:
 
-### 4) Run the app
+- `data/processed/Processed_data_updated2.csv`
+- downloaded artifact files into `data/artifacts/`
+
+If you fetch an artifact set that does not include the newer
+`lexical_index.joblib`, generate it locally after the fetch:
+
+```bash
+python scripts/build_lexical_index.py --overwrite
+```
+
+### 4) Run The App
+
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-## Repository map
+or:
 
-- `app/`: Streamlit user interface
-- `configs/`: YAML config files
-- `data/`: local-only raw, interim, processed, and artifact storage
-- `docs/`: proposal and design docs
-- `notebooks/`: exploration notebooks
-- `scripts/`: pipeline and training scripts
-- `src/recipe_discovery/`: main package
-- `tests/`: smoke and unit tests
+```bash
+make run-app
+```
 
-## MVP workflow
+## Rebuild Artifacts From The Processed CSV
 
-1. Clean and merge recipe data
-2. Build recipe text fields
-3. Compute recipe embeddings
-4. Run cosine retrieval for user queries
-5. Fit k-means clusters for exploration (Implemented without a wrapper)
-6. Produce 2D projection with PCA
-7. Surface everything in Streamlit
+If you do not use the prebuilt Google Drive artifacts, place
+`Processed_data_updated2.csv` at `data/processed/Processed_data_updated2.csv`
+and regenerate the app artifacts locally.
+
+Minimum text-search artifacts:
+
+```bash
+python scripts/build_embeddings.py --overwrite
+python scripts/build_lexical_index.py --overwrite
+```
+
+Optional retrieval index artifact:
+
+```bash
+python scripts/build_index.py --overwrite
+```
+
+Optional image and image+text search artifacts:
+
+```bash
+python scripts/generate_siglip_embeddings.py --overwrite
+```
+
+Optional clustering and map artifacts:
+
+```bash
+python scripts/train_kmeans.py --overwrite
+python scripts/fit_pca.py
+```
+
+Notes:
+
+- Text search requires `recipe_embeddings.npy` and `recipe_ids.csv`.
+- Hybrid text search uses `lexical_index.joblib` when present and falls back to
+  dense-only search when it is missing.
+- Image search requires the SigLIP artifacts generated by
+  `scripts/generate_siglip_embeddings.py`.
+- Cluster exploration uses the manual PyTorch k-means artifact generated by
+  `scripts/train_kmeans.py`.
+
+## Expected Artifact Layout
+
+Core files:
+
+- `data/processed/Processed_data_updated2.csv`
+- `data/artifacts/recipe_embeddings.npy`
+- `data/artifacts/recipe_ids.csv`
+- `data/artifacts/recipe_texts.csv`
+- `data/artifacts/embedding_metadata.json`
+- `data/artifacts/lexical_index.joblib`
+
+Optional files:
+
+- `data/artifacts/recipe_index.joblib`
+- `data/artifacts/recipe_embeddings_siglip.npy`
+- `data/artifacts/recipe_ids_siglip.csv`
+- `data/artifacts/recipe_texts_siglip.csv`
+- `data/artifacts/embedding_metadata_siglip.json`
+- `data/artifacts/kmeans.joblib`
+- `data/artifacts/kmeans_metadata.json`
+- `data/artifacts/pca_projection.npy`
+- `data/artifacts/pca_projector.pkl`
+- `data/artifacts/regressor.joblib`
+- `data/artifacts/regression_metadata.json`
+
+## Repository Map
+
+- `app/`: Streamlit user interface.
+- `configs/`: YAML config files.
+- `data/`: local-only raw, interim, processed, and artifact storage.
+- `docs/`: proposal, design, and module docs.
+- `notebooks/`: exploration notebooks.
+- `scripts/`: pipeline, artifact-building, and training scripts.
+- `src/recipe_discovery/`: main package.
+- `tests/`: smoke and unit tests.
+
+## MVP Workflow
+
+1. Load the processed Food.com recipe table.
+2. Build canonical recipe text fields.
+3. Compute SBERT recipe embeddings.
+4. Build the TF-IDF lexical index for hybrid text retrieval.
+5. Run text, image, or combined retrieval for user queries.
+6. Fit the manual PyTorch k-means model for cluster exploration.
+7. Produce 2D projections with PCA or the autoencoder.
+8. Surface everything in Streamlit.

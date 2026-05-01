@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import sys
 from pathlib import Path
@@ -26,7 +27,6 @@ from app.components.shopping_list import (
     set_item_checked,
 )
 
-st.set_page_config(page_title="Shopping List", layout="wide")
 apply_restaurant_menu_theme()
 st.markdown(
     """
@@ -40,7 +40,9 @@ st.markdown(
         margin: 0.85rem 0 0.35rem 0;
         font-size: 1.3rem;
         color: #5b4434;
+        font-weight: 700;
         font-family: "Cormorant Garamond", "Playfair Display", serif;
+        letter-spacing: 0;
     }
     .shopping-empty-state {
         margin-top: 0.55rem;
@@ -57,9 +59,39 @@ st.markdown(
         line-height: 1.45 !important;
         color: #3f322c !important;
     }
-    .shopping-source-caption {
-        font-size: 0.95rem;
+    .shopping-source-row {
+        margin: 0.12rem 0 0 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.24rem;
+        font-size: 0.92rem;
         color: #665244;
+        line-height: 1.25;
+    }
+    .shopping-source-label {
+        margin-right: 0.12rem;
+        color: #665244;
+        font-weight: 650;
+    }
+    .shopping-source-chip {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+        padding: 0.12rem 0.42rem;
+        border: 1px solid rgba(183, 159, 115, 0.75);
+        border-radius: 999px;
+        background: rgba(255, 250, 241, 0.96);
+        color: #514134;
+        font-size: 0.84rem;
+        line-height: 1.15;
+        overflow-wrap: anywhere;
+    }
+    .shopping-variant-caption {
+        margin: 0.1rem 0 0 0;
+        font-size: 0.86rem;
+        color: #7a614f;
+        line-height: 1.2;
     }
     </style>
     """,
@@ -72,15 +104,49 @@ def _item_widget_suffix(normalized_name: str) -> str:
     return clean or "item"
 
 
-def _format_sources(sources: object) -> str:
+def _source_strings(sources: object) -> list[str]:
     if not isinstance(sources, list) or not sources:
-        return ""
-    source_strings = [str(source).strip() for source in sources if str(source).strip()]
+        return []
+    return [str(source).strip() for source in sources if str(source).strip()]
+
+
+def _source_chips_html(sources: object) -> str:
+    source_strings = _source_strings(sources)
     if not source_strings:
         return ""
-    if len(source_strings) <= 3:
-        return ", ".join(source_strings)
-    return f"{', '.join(source_strings[:3])} (+{len(source_strings) - 3} more)"
+
+    visible_sources = source_strings[:3]
+    chips = "".join(
+        f"<span class='shopping-source-chip'>{html.escape(source)}</span>"
+        for source in visible_sources
+    )
+    if len(source_strings) > 3:
+        chips += (
+            "<span class='shopping-source-chip'>"
+            f"+{len(source_strings) - 3} more"
+            "</span>"
+        )
+    return (
+        "<div class='shopping-source-row'>"
+        "<span class='shopping-source-label'>From:</span>"
+        f"{chips}"
+        "</div>"
+    )
+
+
+def _format_variants(variants: object) -> str:
+    if not isinstance(variants, list):
+        return ""
+    variant_strings: list[str] = []
+    for variant in variants:
+        variant_text = str(variant).strip()
+        if variant_text and variant_text not in variant_strings:
+            variant_strings.append(variant_text)
+    if len(variant_strings) <= 1:
+        return ""
+    if len(variant_strings) <= 4:
+        return ", ".join(variant_strings)
+    return f"{', '.join(variant_strings[:4])} (+{len(variant_strings) - 4} more)"
 
 
 def _clear_checkbox_widget_state() -> None:
@@ -209,7 +275,10 @@ grouped_items = get_grouped_shopping_items(group_by_category=group_by_category)
 
 for section_label, items in grouped_items.items():
     if group_by_category:
-        st.markdown(f"<h3 class='shopping-section-heading'>{section_label}</h3>", unsafe_allow_html=True)
+        st.markdown(
+            f"<h3 class='shopping-section-heading'>{html.escape(section_label)}</h3>",
+            unsafe_allow_html=True,
+        )
 
     for item in items:
         normalized_name = str(item.get("normalized_name", "")).strip()
@@ -231,10 +300,15 @@ for section_label, items in grouped_items.items():
                 set_item_checked(normalized_name, checked_now)
 
         with row_cols[1]:
-            source_caption = _format_sources(item.get("source_recipes"))
-            if source_caption:
+            source_html = _source_chips_html(item.get("source_recipes"))
+            if source_html:
+                st.markdown(source_html, unsafe_allow_html=True)
+            variants_caption = _format_variants(item.get("merged_variants"))
+            if variants_caption:
                 st.markdown(
-                    f"<p class='shopping-source-caption'>From: {source_caption}</p>",
+                    "<p class='shopping-variant-caption'>"
+                    f"Combines: {html.escape(variants_caption)}"
+                    "</p>",
                     unsafe_allow_html=True,
                 )
 

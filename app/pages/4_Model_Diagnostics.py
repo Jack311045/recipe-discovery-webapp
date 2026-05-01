@@ -19,7 +19,6 @@ import streamlit as st
 from app.components.theme import apply_restaurant_menu_theme
 from recipe_discovery.settings import ARTIFACTS_DIR
 
-st.set_page_config(page_title="Model Diagnostics", layout="wide")
 apply_restaurant_menu_theme()
 st.markdown(
     """

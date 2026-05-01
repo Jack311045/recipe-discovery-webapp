@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import random
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -15,7 +17,6 @@ import streamlit as st
 
 from app.components.theme import apply_restaurant_menu_theme
 
-st.set_page_config(page_title="Search Recipes", layout="wide")
 apply_restaurant_menu_theme()
 
 import pandas as pd
@@ -23,10 +24,14 @@ import streamlit.components.v1 as components
 from PIL import Image
 
 from app.components.search_ui import (
+    DEFAULT_SEARCH_RESULT_LIMIT,
+    LOAD_MORE_RESULT_INCREMENT,
+    SEARCH_PREFETCH_RESULT_LIMIT,
     SORT_OPTIONS,
     build_result_summary,
     get_active_tags,
     infer_tag_columns,
+    merge_appended_results,
     sort_results_for_display,
 )
 from app.components.recipe_cards import parse_ingredients, render_recipe_card
@@ -58,6 +63,12 @@ LANDING_QUERIES = [
 ]
 
 
+@st.cache_resource(show_spinner=False)
+def _get_prefetch_executor() -> ThreadPoolExecutor:
+    """Small background worker pool for warming hidden result caches."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="search-prefetch")
+
+
 def _format_avg(value: float | int | None, *, unit: str = "", decimals: int = 1) -> str:
     """Format optional average metrics for display cards."""
     if value is None:
@@ -73,6 +84,7 @@ def _initialize_session_state() -> None:
     """Initialize search-page session state keys."""
     defaults = {
         "search_results_df": None,
+        "search_results_pool_df": None,
         "last_query": "",
         "last_search_mode": "",
         "search_query_input": "",
@@ -85,6 +97,13 @@ def _initialize_session_state() -> None:
         "feedback_active_request": None,
         "feedback_embedding_space": "text",
         "upload_widget_version": 0,
+        "search_result_limit": DEFAULT_SEARCH_RESULT_LIMIT,
+        "active_cluster_id": None,
+        "last_alpha": 0.75,
+        "last_search_image": None,
+        "prefetch_future": None,
+        "prefetch_signature": "",
+        "prefetch_error": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -99,6 +118,16 @@ def _reset_feedback() -> None:
     st.session_state["feedback_excluded_ids"] = set()
     st.session_state["feedback_active_request"] = None
     st.session_state["feedback_embedding_space"] = "text"
+
+
+def _reset_prefetch_state() -> None:
+    """Clear any in-flight hidden-cache prefetch for a new search context."""
+    future = st.session_state.get("prefetch_future")
+    if isinstance(future, Future) and not future.done():
+        future.cancel()
+    st.session_state["prefetch_future"] = None
+    st.session_state["prefetch_signature"] = ""
+    st.session_state["prefetch_error"] = ""
 
 
 def _get_query_param(name: str) -> str:
@@ -239,6 +268,365 @@ def _open_uploaded_image(uploaded_file) -> Image.Image:
     image = Image.open(uploaded_file).copy()
     uploaded_file.seek(0)
     return image
+
+
+def _effective_top_k(
+    display_limit: int,
+    cluster_id: int | None,
+    cluster_assignments_df: pd.DataFrame | None,
+) -> int:
+    """Return the retrieval pool size needed for the visible result limit."""
+    if cluster_id is None or cluster_assignments_df is None:
+        return int(display_limit)
+
+    multiplier = cluster_filter_top_k_multiplier(cluster_id, cluster_assignments_df)
+    return int(display_limit * multiplier)
+
+
+def _apply_cluster_filter_and_trim(
+    results: pd.DataFrame,
+    *,
+    display_limit: int,
+    cluster_id: int | None,
+    cluster_assignments_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Apply the optional cluster filter and trim back to the visible limit."""
+    if cluster_id is not None and cluster_assignments_df is not None:
+        results = filter_results_by_cluster(results, cluster_id, cluster_assignments_df)
+
+    if len(results) > display_limit:
+        results = results.iloc[:display_limit].reset_index(drop=True)
+
+    return results.reset_index(drop=True)
+
+
+def _visible_request_for_limit(
+    request,
+    display_limit: int,
+    cluster_id: int | None,
+    cluster_assignments_df: pd.DataFrame | None,
+):
+    """Return a request sized for the rows currently visible to the user."""
+    return replace(
+        request,
+        top_k=_effective_top_k(display_limit, cluster_id, cluster_assignments_df),
+    )
+
+
+def _filter_excluded_results(results: pd.DataFrame) -> pd.DataFrame:
+    """Remove recipes dismissed with negative feedback from a cached pool."""
+    excluded = st.session_state.get("feedback_excluded_ids") or set()
+    if results.empty or not excluded or "recipe_id" not in results.columns:
+        return results
+
+    keep = ~results["recipe_id"].astype(str).isin({str(item) for item in excluded})
+    return results.loc[keep].reset_index(drop=True)
+
+
+def _prefetch_signature(
+    *,
+    search_mode: str,
+    search_query: str,
+    request,
+    target_limit: int,
+    cluster_id: int | None,
+    alpha: float,
+    image: Image.Image | None,
+) -> str:
+    """Build a stable signature so stale background results are ignored."""
+    return json.dumps(
+        {
+            "mode": search_mode,
+            "query": search_query,
+            "diet": getattr(request, "dietary_filter", None),
+            "time": getattr(request, "max_time_minutes", None),
+            "ingredients": getattr(request, "max_ingredients", None),
+            "target_limit": target_limit,
+            "cluster_id": int(cluster_id) if cluster_id is not None else None,
+            "alpha": round(float(alpha), 3),
+            "image_id": id(image) if image is not None else None,
+        },
+        sort_keys=True,
+    )
+
+
+def _prefetch_results_worker(
+    *,
+    svc,
+    search_mode: str,
+    search_query: str,
+    request,
+    target_limit: int,
+    cluster_id: int | None,
+    cluster_assignments_df: pd.DataFrame | None,
+    alpha: float,
+    image: Image.Image | None,
+) -> pd.DataFrame:
+    """Fetch a larger hidden result pool without touching Streamlit state."""
+    effective_top_k = _effective_top_k(target_limit, cluster_id, cluster_assignments_df)
+    prefetch_request = replace(request, top_k=effective_top_k)
+
+    if search_mode == "image+text":
+        if image is None:
+            return pd.DataFrame()
+        results = svc.search_combined(search_query, image, prefetch_request, alpha=alpha)
+    elif search_mode == "image":
+        if image is None:
+            return pd.DataFrame()
+        results = svc.search_by_image(image, prefetch_request)
+    else:
+        results = svc.search(prefetch_request)
+
+    return _apply_cluster_filter_and_trim(
+        results,
+        display_limit=target_limit,
+        cluster_id=cluster_id,
+        cluster_assignments_df=cluster_assignments_df,
+    )
+
+
+def _harvest_prefetch_if_ready(*, wait_seconds: float = 0.0) -> bool:
+    """Move completed background prefetch results into the hidden result pool."""
+    future = st.session_state.get("prefetch_future")
+    if not isinstance(future, Future):
+        return False
+    if not future.done() and wait_seconds <= 0:
+        return False
+
+    signature = st.session_state.get("prefetch_signature", "")
+    try:
+        prefetched = future.result(timeout=wait_seconds)
+    except TimeoutError:
+        return False
+    except Exception as exc:
+        st.session_state["prefetch_error"] = str(exc)
+        st.session_state["prefetch_future"] = None
+        st.session_state["prefetch_signature"] = ""
+        return False
+
+    if signature != st.session_state.get("prefetch_signature", ""):
+        return False
+
+    existing_pool = st.session_state.get("search_results_pool_df")
+    if isinstance(existing_pool, pd.DataFrame) and not existing_pool.empty:
+        target_limit = max(len(existing_pool), len(prefetched))
+        prefetched = merge_appended_results(
+            existing_pool,
+            prefetched,
+            limit=target_limit,
+        )
+
+    st.session_state["search_results_pool_df"] = prefetched.copy()
+    st.session_state["prefetch_future"] = None
+    st.session_state["prefetch_signature"] = ""
+    st.session_state["prefetch_error"] = ""
+    _save_current_search_snapshot()
+    return True
+
+
+def _start_prefetch_if_needed(
+    *,
+    search_mode: str,
+    search_query: str,
+    cluster_assignments_df: pd.DataFrame | None,
+) -> None:
+    """Start warming the hidden result pool after visible results are rendered."""
+    base_request = st.session_state.get("feedback_active_request")
+    if base_request is None or search_mode not in {"text", "image", "image+text"}:
+        return
+
+    future = st.session_state.get("prefetch_future")
+    if isinstance(future, Future) and not future.done():
+        return
+
+    current_limit = int(
+        st.session_state.get("search_result_limit") or DEFAULT_SEARCH_RESULT_LIMIT
+    )
+    target_limit = max(
+        SEARCH_PREFETCH_RESULT_LIMIT,
+        current_limit + LOAD_MORE_RESULT_INCREMENT * 2,
+    )
+    pool = st.session_state.get("search_results_pool_df")
+    if isinstance(pool, pd.DataFrame) and len(pool) >= target_limit:
+        return
+
+    active_cluster_id = st.session_state.get("active_cluster_id")
+    active_cluster_assignments_df = cluster_assignments_df
+    if active_cluster_id is not None and (
+        active_cluster_assignments_df is None or active_cluster_assignments_df.empty
+    ):
+        active_cluster_assignments_df = load_cluster_assignments()
+
+    image = st.session_state.get("last_search_image")
+    image_for_worker = image.copy() if isinstance(image, Image.Image) else None
+    alpha = float(st.session_state.get("last_alpha", 0.75))
+    signature = _prefetch_signature(
+        search_mode=search_mode,
+        search_query=search_query,
+        request=base_request,
+        target_limit=target_limit,
+        cluster_id=active_cluster_id,
+        alpha=alpha,
+        image=image,
+    )
+    if st.session_state.get("prefetch_signature") == signature:
+        return
+
+    svc = get_retrieval_service()
+    future = _get_prefetch_executor().submit(
+        _prefetch_results_worker,
+        svc=svc,
+        search_mode=search_mode,
+        search_query=search_query,
+        request=base_request,
+        target_limit=target_limit,
+        cluster_id=active_cluster_id,
+        cluster_assignments_df=active_cluster_assignments_df,
+        alpha=alpha,
+        image=image_for_worker,
+    )
+    st.session_state["prefetch_future"] = future
+    st.session_state["prefetch_signature"] = signature
+    st.session_state["prefetch_error"] = ""
+
+
+def _cached_results_for_limit(
+    existing_results: pd.DataFrame,
+    *,
+    next_limit: int,
+) -> pd.DataFrame | None:
+    """Return visible rows from the cached result pool when enough are available."""
+    pool = st.session_state.get("search_results_pool_df")
+    if not isinstance(pool, pd.DataFrame) or pool.empty:
+        return None
+
+    pool = _filter_excluded_results(pool)
+    if len(pool) <= len(existing_results):
+        return None
+
+    cached_limit = min(next_limit, len(pool))
+    cached_results = merge_appended_results(
+        existing_results,
+        pool,
+        limit=cached_limit,
+    )
+    if len(cached_results) <= len(existing_results):
+        return None
+    return cached_results
+
+
+def _load_more_results(
+    *,
+    search_mode: str,
+    search_query: str,
+    existing_results: pd.DataFrame,
+    cluster_assignments_df: pd.DataFrame | None,
+) -> None:
+    """Fetch the next small batch for the current query and append it."""
+    _harvest_prefetch_if_ready(wait_seconds=0.25)
+    base_request = st.session_state.get("feedback_active_request")
+    if base_request is None:
+        st.info("Run a search first, then load more matches from that query.")
+        return
+
+    current_limit = int(
+        st.session_state.get("search_result_limit") or DEFAULT_SEARCH_RESULT_LIMIT
+    )
+    next_limit = current_limit + LOAD_MORE_RESULT_INCREMENT
+    active_cluster_id = st.session_state.get("active_cluster_id")
+    active_cluster_assignments_df = cluster_assignments_df
+    if active_cluster_id is not None and (
+        active_cluster_assignments_df is None or active_cluster_assignments_df.empty
+    ):
+        active_cluster_assignments_df = load_cluster_assignments()
+
+    cached_results = _cached_results_for_limit(
+        existing_results,
+        next_limit=next_limit,
+    )
+    if cached_results is not None:
+        st.session_state["search_result_limit"] = len(cached_results)
+        st.session_state["feedback_active_request"] = _visible_request_for_limit(
+            base_request,
+            len(cached_results),
+            active_cluster_id,
+            active_cluster_assignments_df,
+        )
+        st.session_state["search_results_df"] = cached_results.copy()
+        _save_current_search_snapshot()
+        st.rerun()
+
+    future = st.session_state.get("prefetch_future")
+    if isinstance(future, Future) and not future.done():
+        st.info("Preparing more recipes now. Try again in a moment.")
+        return
+
+    cache_limit = next_limit + LOAD_MORE_RESULT_INCREMENT * 2
+    effective_top_k = _effective_top_k(
+        cache_limit,
+        active_cluster_id,
+        active_cluster_assignments_df,
+    )
+    expanded_request = replace(base_request, top_k=effective_top_k)
+    svc = get_retrieval_service()
+
+    with st.spinner("Finding a few more recipes..."):
+        if search_mode == "image+text":
+            image = st.session_state.get("last_search_image")
+            if image is None:
+                st.warning("Upload the image again to load more image-based matches.")
+                return
+            expanded_results = svc.search_combined(
+                search_query,
+                image,
+                expanded_request,
+                alpha=float(st.session_state.get("last_alpha", 0.75)),
+            )
+        elif search_mode == "image":
+            image = st.session_state.get("last_search_image")
+            if image is None:
+                st.warning("Upload the image again to load more image-based matches.")
+                return
+            expanded_results = svc.search_by_image(image, expanded_request)
+        else:
+            expanded_results = svc.search(expanded_request)
+
+    expanded_results = _apply_cluster_filter_and_trim(
+        expanded_results,
+        display_limit=cache_limit,
+        cluster_id=active_cluster_id,
+        cluster_assignments_df=active_cluster_assignments_df,
+    )
+    expanded_results = _filter_excluded_results(expanded_results)
+    pool = st.session_state.get("search_results_pool_df")
+    if isinstance(pool, pd.DataFrame) and not pool.empty:
+        expanded_results = merge_appended_results(
+            pool,
+            expanded_results,
+            limit=cache_limit,
+        )
+
+    combined_results = merge_appended_results(
+        existing_results,
+        expanded_results,
+        limit=next_limit,
+    )
+    if len(combined_results) <= len(existing_results):
+        st.info("No more recipes matched this search.")
+        return
+
+    visible_count = len(combined_results)
+    st.session_state["search_result_limit"] = visible_count
+    st.session_state["feedback_active_request"] = _visible_request_for_limit(
+        base_request,
+        visible_count,
+        active_cluster_id,
+        active_cluster_assignments_df,
+    )
+    st.session_state["search_results_df"] = combined_results.copy()
+    st.session_state["search_results_pool_df"] = expanded_results.copy()
+    _save_current_search_snapshot()
+    st.rerun()
 
 
 def _load_landing_results() -> pd.DataFrame:
@@ -533,8 +921,6 @@ with st.sidebar:
             step=1,
         )
 
-    top_k = st.slider("Number of results", min_value=3, max_value=20, value=8)
-
     # Cluster filter (only rendered when k-means artifact is available)
     selected_cluster_id: int | None = None
     cluster_assignments_df: pd.DataFrame | None = None
@@ -643,15 +1029,19 @@ if run_search:
 
     svc = get_retrieval_service()
     _reset_feedback()
+    _reset_prefetch_state()
+    display_limit = DEFAULT_SEARCH_RESULT_LIMIT
+    st.session_state["search_result_limit"] = display_limit
+    st.session_state["active_cluster_id"] = selected_cluster_id
+    st.session_state["last_alpha"] = alpha
 
-    # If a cluster filter is active, over-fetch so the post-filter result set
-    # is still close to the user's requested top_k. Multiplier is ~1/cluster_share.
-    effective_top_k = top_k
-    if selected_cluster_id is not None and cluster_assignments_df is not None:
-        multiplier = cluster_filter_top_k_multiplier(
-            selected_cluster_id, cluster_assignments_df
-        )
-        effective_top_k = top_k * multiplier
+    # Keep the first search small; a background prefetch warms hidden rows after
+    # these visible results have already rendered.
+    effective_top_k = _effective_top_k(
+        display_limit,
+        selected_cluster_id,
+        cluster_assignments_df,
+    )
 
     request = RetrievalRequest(
         query=query,
@@ -666,10 +1056,11 @@ if run_search:
 
     if has_query or has_image:
         with results_placeholder.container():
-            _render_skeleton_grid(top_k)
+            _render_skeleton_grid(display_limit)
 
     if has_image and has_query:
         image = _open_uploaded_image(uploaded_file)
+        st.session_state["last_search_image"] = image.copy()
         try:
             results = svc.search_combined(query, image, request, alpha=alpha)
             st.session_state["feedback_query_vec"] = svc.encode_combined_query(
@@ -686,6 +1077,7 @@ if run_search:
             search_mode = ""
     elif has_image:
         image = _open_uploaded_image(uploaded_file)
+        st.session_state["last_search_image"] = image.copy()
         try:
             results = svc.search_by_image(image, request)
             st.session_state["feedback_query_vec"] = svc.encode_image_query(image)
@@ -697,6 +1089,7 @@ if run_search:
             results = None
             search_mode = ""
     elif has_query:
+        st.session_state["last_search_image"] = None
         st.session_state["feedback_query_vec"] = svc.encode_text_query(query)
         st.session_state["feedback_active_request"] = request
         st.session_state["feedback_embedding_space"] = "text"
@@ -704,24 +1097,23 @@ if run_search:
         search_mode = "text"
     else:
         st.warning("Please enter a search query or upload an image.")
+        st.session_state["last_search_image"] = None
         results = None
         search_mode = ""
 
     results_placeholder.empty()
 
-    # Apply cluster filter (if active) and trim to user's requested top_k.
-    if (
-        isinstance(results, pd.DataFrame)
-        and selected_cluster_id is not None
-        and cluster_assignments_df is not None
-    ):
-        results = filter_results_by_cluster(
-            results, selected_cluster_id, cluster_assignments_df
+    # Apply cluster filter (if active) and trim to the visible result limit.
+    if isinstance(results, pd.DataFrame):
+        results = _apply_cluster_filter_and_trim(
+            results,
+            display_limit=display_limit,
+            cluster_id=selected_cluster_id,
+            cluster_assignments_df=cluster_assignments_df,
         )
-        if len(results) > top_k:
-            results = results.iloc[:top_k].reset_index(drop=True)
 
     if isinstance(results, pd.DataFrame):
+        st.session_state["search_results_pool_df"] = results.copy()
         st.session_state["search_results_df"] = results.copy()
         st.session_state["last_query"] = query.strip()
         st.session_state["last_search_mode"] = search_mode
@@ -732,6 +1124,7 @@ if run_search:
 results_df = st.session_state.get("search_results_df")
 search_query = st.session_state.get("last_query", "")
 search_mode = st.session_state.get("last_search_mode", "")
+_harvest_prefetch_if_ready()
 
 if isinstance(results_df, pd.DataFrame):
     if results_df.empty:
@@ -772,6 +1165,33 @@ if isinstance(results_df, pd.DataFrame):
             max_tags=max_tags,
             search_mode=search_mode,
             show_feedback=show_feedback,
+        )
+
+        if (
+            search_mode in {"text", "image", "image+text"}
+            and st.session_state.get("feedback_active_request") is not None
+        ):
+            load_more_cols = st.columns([1.2, 1, 1.2])
+            with load_more_cols[1]:
+                if st.button(
+                    "Get a few more",
+                    key="load_more_results",
+                    use_container_width=True,
+                ):
+                    _load_more_results(
+                        search_mode=search_mode,
+                        search_query=search_query,
+                        existing_results=results_df,
+                        cluster_assignments_df=cluster_assignments_df,
+                    )
+            future = st.session_state.get("prefetch_future")
+            if isinstance(future, Future) and not future.done():
+                st.caption("Preparing more matches in the background.")
+
+        _start_prefetch_if_needed(
+            search_mode=search_mode,
+            search_query=search_query,
+            cluster_assignments_df=cluster_assignments_df,
         )
 else:
     _render_landing_state()

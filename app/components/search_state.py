@@ -14,6 +14,7 @@ SEARCH_STATE_TOKEN_KEY = "search_state_token"
 
 _SEARCH_STATE_KEYS = (
     "search_results_df",
+    "search_results_pool_df",
     "last_query",
     "last_search_mode",
     "search_query_input",
@@ -22,6 +23,10 @@ _SEARCH_STATE_KEYS = (
     "feedback_excluded_ids",
     "feedback_active_request",
     "feedback_embedding_space",
+    "search_result_limit",
+    "active_cluster_id",
+    "last_alpha",
+    "last_search_image",
 )
 
 
@@ -37,6 +42,12 @@ def _copy_value(value: Any) -> Any:
         return set(value)
     if isinstance(value, list):
         return list(value)
+    copy_value = getattr(value, "copy", None)
+    if callable(copy_value):
+        try:
+            return copy_value()
+        except TypeError:
+            return value
     return value
 
 
